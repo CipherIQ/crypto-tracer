@@ -1,0 +1,43 @@
+# Build artifacts
+build/
+*.o
+*.so
+*.a
+
+# Generated files
+src/ebpf/vmlinux.h
+*.skel.h
+
+# Compiled binaries
+crypto-tracer
+test-unit
+test-integration
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# Editor files
+.vscode/
+.idea/
+.kiro/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# Package files
+*.deb
+*.rpm
+*.tar.gz
+*.zip
