@@ -12,6 +12,7 @@
 #include <string.h>
 #include <stdio.h>
 #include "include/crypto_tracer.h"
+#include "include/logger.h"
 
 /* Default buffer pool capacity */
 #define DEFAULT_POOL_CAPACITY 1000
@@ -34,17 +35,19 @@ event_buffer_pool_t *event_buffer_pool_create(size_t capacity) {
     /* Allocate pool structure */
     pool = (event_buffer_pool_t *)calloc(1, sizeof(event_buffer_pool_t));
     if (!pool) {
-        fprintf(stderr, "Error: Failed to allocate event buffer pool\n");
+        log_error("Failed to allocate event buffer pool");
         return NULL;
     }
     
     /* Allocate event array */
     pool->events = (processed_event_t *)calloc(capacity, sizeof(processed_event_t));
     if (!pool->events) {
-        fprintf(stderr, "Error: Failed to allocate event buffer array\n");
+        log_error("Failed to allocate event buffer array");
         free(pool);
         return NULL;
     }
+    
+    log_debug("Event buffer pool created with capacity: %zu", capacity);
     
     pool->capacity = capacity;
     pool->in_use_count = 0;
@@ -76,8 +79,7 @@ processed_event_t *event_buffer_pool_acquire(event_buffer_pool_t *pool) {
     
     /* Check if free list is empty */
     if (!pool->free_list) {
-        fprintf(stderr, "Warning: Event buffer pool exhausted (%zu events in use)\n", 
-                pool->in_use_count);
+        log_warn("Event buffer pool exhausted (%zu events in use)", pool->in_use_count);
         return NULL;
     }
     
@@ -109,12 +111,12 @@ void event_buffer_pool_release(event_buffer_pool_t *pool, processed_event_t *eve
     
     /* Verify this event belongs to this pool */
     if (event < pool->events || event >= pool->events + pool->capacity) {
-        fprintf(stderr, "Warning: Attempted to release event not from this pool\n");
+        log_warn("Attempted to release event not from this pool");
         return;
     }
     
     if (!event->in_use) {
-        fprintf(stderr, "Warning: Attempted to release event that is not in use\n");
+        log_warn("Attempted to release event that is not in use");
         return;
     }
     

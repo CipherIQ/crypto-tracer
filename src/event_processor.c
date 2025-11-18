@@ -21,6 +21,7 @@
 #include <sys/types.h>
 #include "include/event_processor.h"
 #include "include/privacy_filter.h"
+#include "include/logger.h"
 #include "ebpf/common.h"
 
 /**
@@ -30,7 +31,7 @@
 filter_set_t *filter_set_create(void) {
     filter_set_t *set = (filter_set_t *)calloc(1, sizeof(filter_set_t));
     if (!set) {
-        fprintf(stderr, "Error: Failed to allocate filter set\n");
+        log_error("Failed to allocate filter set");
         return NULL;
     }
     
@@ -58,7 +59,7 @@ int filter_set_add(filter_set_t *set, filter_type_t type, const void *value) {
     /* Allocate new filter */
     filter = (filter_t *)calloc(1, sizeof(filter_t));
     if (!filter) {
-        fprintf(stderr, "Error: Failed to allocate filter\n");
+        log_error("Failed to allocate filter");
         return -1;
     }
     
@@ -305,7 +306,7 @@ event_processor_t *event_processor_create(cli_args_t *args) {
     /* Allocate processor structure */
     proc = (event_processor_t *)calloc(1, sizeof(event_processor_t));
     if (!proc) {
-        fprintf(stderr, "Error: Failed to allocate event processor\n");
+        log_error("Failed to allocate event processor");
         return NULL;
     }
     
@@ -758,7 +759,7 @@ int apply_privacy_filter(processed_event_t *event, bool redact_enabled) {
             event->file = filtered_path;
         } else {
             /* If filtering failed, keep original but log warning */
-            fprintf(stderr, "Warning: Failed to filter file path\n");
+            log_warn("Failed to filter file path");
         }
     }
     
@@ -769,7 +770,7 @@ int apply_privacy_filter(processed_event_t *event, bool redact_enabled) {
             free(event->library);
             event->library = filtered_path;
         } else {
-            fprintf(stderr, "Warning: Failed to filter library path\n");
+            log_warn("Failed to filter library path");
         }
     }
     
@@ -780,7 +781,7 @@ int apply_privacy_filter(processed_event_t *event, bool redact_enabled) {
             free(event->exe);
             event->exe = filtered_path;
         } else {
-            fprintf(stderr, "Warning: Failed to filter exe path\n");
+            log_warn("Failed to filter exe path");
         }
     }
     
@@ -791,7 +792,7 @@ int apply_privacy_filter(processed_event_t *event, bool redact_enabled) {
             free(event->cmdline);
             event->cmdline = filtered_cmdline;
         } else {
-            fprintf(stderr, "Warning: Failed to filter cmdline\n");
+            log_warn("Failed to filter cmdline");
         }
     }
     

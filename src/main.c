@@ -20,6 +20,7 @@
 #include <limits.h>
 #include <signal.h>
 #include "include/crypto_tracer.h"
+#include "include/logger.h"
 
 /* Minimum supported kernel version */
 #define MIN_KERNEL_MAJOR 4
@@ -592,20 +593,21 @@ int validate_privileges(void) {
     }
     
     /* Requirement 7.2, 7.3: Exit with code 3 and display helpful error message */
-    fprintf(stderr, "Error: Insufficient privileges to run crypto-tracer\n\n");
-    fprintf(stderr, "crypto-tracer requires one of the following:\n");
-    fprintf(stderr, "  1. Run as root: sudo crypto-tracer [options]\n");
+    char suggestion[512];
     
     if (major > CAP_BPF_KERNEL_MAJOR || 
         (major == CAP_BPF_KERNEL_MAJOR && minor >= CAP_BPF_KERNEL_MINOR)) {
-        fprintf(stderr, "  2. Grant CAP_BPF capability: sudo setcap cap_bpf+ep /path/to/crypto-tracer\n");
-        fprintf(stderr, "  3. Grant CAP_SYS_ADMIN capability: sudo setcap cap_sys_admin+ep /path/to/crypto-tracer\n");
+        snprintf(suggestion, sizeof(suggestion),
+                 "Run as root (sudo crypto-tracer), or grant CAP_BPF capability: "
+                 "sudo setcap cap_bpf+ep /path/to/crypto-tracer");
     } else {
-        fprintf(stderr, "  2. Grant CAP_SYS_ADMIN capability: sudo setcap cap_sys_admin+ep /path/to/crypto-tracer\n");
-        fprintf(stderr, "     (CAP_BPF is not available on kernel %d.%d, requires 5.8+)\n", major, minor);
+        snprintf(suggestion, sizeof(suggestion),
+                 "Run as root (sudo crypto-tracer), or grant CAP_SYS_ADMIN capability: "
+                 "sudo setcap cap_sys_admin+ep /path/to/crypto-tracer "
+                 "(CAP_BPF not available on kernel %d.%d)", major, minor);
     }
     
-    fprintf(stderr, "\nNote: CAP_BPF is the preferred capability on kernel 5.8+\n");
+    log_error_with_suggestion("Insufficient privileges to run crypto-tracer", suggestion);
     
     return EXIT_PRIVILEGE_ERROR;
 }
@@ -621,25 +623,31 @@ int check_kernel_version(void) {
     
     /* Get kernel version information */
     if (uname(&uts) != 0) {
-        fprintf(stderr, "Error: Failed to get kernel version: %s\n", strerror(errno));
+        log_system_error("Failed to get kernel version");
         return EXIT_KERNEL_ERROR;
     }
     
     /* Parse kernel version */
     if (parse_kernel_version(uts.release, &major, &minor, &patch) != 0) {
-        fprintf(stderr, "Error: Failed to parse kernel version: %s\n", uts.release);
+        log_error("Failed to parse kernel version: %s", uts.release);
         return EXIT_KERNEL_ERROR;
     }
+    
+    log_debug("Detected kernel version: %d.%d.%d (%s)", major, minor, patch, uts.release);
     
     /* Requirement 9.1: Check for minimum kernel version 4.15+ */
     if (major < MIN_KERNEL_MAJOR || 
         (major == MIN_KERNEL_MAJOR && minor < MIN_KERNEL_MINOR)) {
-        fprintf(stderr, "Error: Kernel version %d.%d.%d is not supported\n", 
-                major, minor, patch);
-        fprintf(stderr, "\ncrypto-tracer requires Linux kernel 4.15 or later\n");
-        fprintf(stderr, "Your kernel: %s (version %d.%d.%d)\n", 
-                uts.release, major, minor, patch);
-        fprintf(stderr, "\nPlease upgrade your kernel to use crypto-tracer\n");
+        char error_msg[256];
+        char suggestion[256];
+        
+        snprintf(error_msg, sizeof(error_msg),
+                 "Kernel version %d.%d.%d is not supported (requires 4.15+)",
+                 major, minor, patch);
+        snprintf(suggestion, sizeof(suggestion),
+                 "Please upgrade your kernel to Linux 4.15 or later");
+        
+        log_error_with_suggestion(error_msg, suggestion);
         return EXIT_KERNEL_ERROR;
     }
     
@@ -647,27 +655,18 @@ int check_kernel_version(void) {
     if (major > CAP_BPF_KERNEL_MAJOR || 
         (major == CAP_BPF_KERNEL_MAJOR && minor >= CAP_BPF_KERNEL_MINOR)) {
         /* CAP_BPF is available - enhanced security mode */
-        if (getenv("CRYPTO_TRACER_VERBOSE")) {
-            fprintf(stderr, "Info: Kernel %d.%d.%d supports CAP_BPF (enhanced security)\n",
-                    major, minor, patch);
-        }
+        log_debug("Kernel %d.%d.%d supports CAP_BPF (enhanced security)", major, minor, patch);
     } else {
         /* Older kernel - will use CAP_SYS_ADMIN */
-        if (getenv("CRYPTO_TRACER_VERBOSE")) {
-            fprintf(stderr, "Info: Kernel %d.%d.%d requires CAP_SYS_ADMIN (CAP_BPF not available)\n",
-                    major, minor, patch);
-        }
+        log_debug("Kernel %d.%d.%d requires CAP_SYS_ADMIN (CAP_BPF not available)", 
+                  major, minor, patch);
     }
     
     /* Check for eBPF support by looking for /sys/kernel/btf/vmlinux or /proc/config.gz */
     if (access("/sys/kernel/btf/vmlinux", F_OK) == 0) {
-        if (getenv("CRYPTO_TRACER_VERBOSE")) {
-            fprintf(stderr, "Info: BTF support detected (CO-RE enabled)\n");
-        }
+        log_debug("BTF support detected (CO-RE enabled)");
     } else {
-        if (getenv("CRYPTO_TRACER_VERBOSE")) {
-            fprintf(stderr, "Info: BTF not available, using fallback headers\n");
-        }
+        log_debug("BTF not available, using fallback headers");
     }
     
     /* Requirement 9.4: Graceful feature detection - always succeed if kernel >= 4.15 */
@@ -677,6 +676,7 @@ int check_kernel_version(void) {
 int main(int argc, char **argv) {
     int ret;
     cli_args_t args;
+    logger_config_t logger_config;
     
     /* Parse command-line arguments */
     ret = parse_args(argc, argv, &args);
@@ -691,52 +691,64 @@ int main(int argc, char **argv) {
         return EXIT_SUCCESS;
     }
     
+    /* Initialize logger with command-line settings */
+    logger_config.min_level = LOG_LEVEL_INFO;
+    logger_config.quiet = args.quiet;
+    logger_config.verbose = args.verbose;
+    logger_config.output = stderr;
+    logger_init(&logger_config);
+    
+    log_debug("crypto-tracer v%s starting", CRYPTO_TRACER_VERSION);
+    log_debug("Command: %s", 
+              args.command == CMD_MONITOR ? "monitor" :
+              args.command == CMD_PROFILE ? "profile" :
+              args.command == CMD_SNAPSHOT ? "snapshot" :
+              args.command == CMD_LIBS ? "libs" :
+              args.command == CMD_FILES ? "files" : "unknown");
+    
     /* Validate privileges */
+    log_debug("Validating privileges...");
     ret = validate_privileges();
     if (ret != EXIT_SUCCESS) {
         return ret;
     }
+    log_debug("Privilege validation passed");
     
     /* Check kernel version and compatibility */
+    log_debug("Checking kernel version and compatibility...");
     ret = check_kernel_version();
     if (ret != EXIT_SUCCESS) {
         return ret;
     }
+    log_debug("Kernel compatibility check passed");
     
     /* Setup signal handlers for graceful shutdown */
+    log_debug("Setting up signal handlers...");
     ret = setup_signal_handlers();
     if (ret != EXIT_SUCCESS) {
         return ret;
     }
+    log_debug("Signal handlers configured");
     
     /* Display parsed arguments in verbose mode */
     if (args.verbose) {
-        printf("crypto-tracer v%s\n", CRYPTO_TRACER_VERSION);
-        printf("Command: %s\n", 
-               args.command == CMD_MONITOR ? "monitor" :
-               args.command == CMD_PROFILE ? "profile" :
-               args.command == CMD_SNAPSHOT ? "snapshot" :
-               args.command == CMD_LIBS ? "libs" :
-               args.command == CMD_FILES ? "files" : "unknown");
+        log_info("crypto-tracer v%s initialized", CRYPTO_TRACER_VERSION);
         if (args.duration > 0) {
-            printf("Duration: %d seconds\n", args.duration);
+            log_info("Duration: %d seconds", args.duration);
         }
         if (args.pid > 0) {
-            printf("Target PID: %d\n", args.pid);
+            log_info("Target PID: %d", args.pid);
         }
         if (args.process_name) {
-            printf("Target process: %s\n", args.process_name);
+            log_info("Target process: %s", args.process_name);
         }
         if (args.output_file) {
-            printf("Output file: %s\n", args.output_file);
+            log_info("Output file: %s", args.output_file);
         }
-        printf("Privilege and kernel checks passed\n");
     }
     
     /* TODO: Dispatch to command handlers (will be implemented in later tasks) */
-    if (!args.quiet) {
-        printf("Command parsing successful. Command execution not yet implemented.\n");
-    }
+    log_info("Command parsing successful. Command execution not yet implemented.");
     
     return EXIT_SUCCESS;
 }

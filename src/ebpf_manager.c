@@ -21,6 +21,7 @@
 
 #include "crypto_tracer.h"
 #include "ebpf_manager.h"
+#include "logger.h"
 #include "ebpf/common.h"
 
 /* Include generated BPF skeletons */
@@ -55,13 +56,30 @@ struct ebpf_manager {
     bool programs_attached;
 };
 
-/* Libbpf logging callback */
+/* Libbpf logging callback - integrate with our logger */
 static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
 {
-    /* Only print warnings and errors by default */
-    if (level == LIBBPF_WARN || level == LIBBPF_INFO) {
-        return vfprintf(stderr, format, args);
+    char buffer[1024];
+    vsnprintf(buffer, sizeof(buffer), format, args);
+    
+    /* Remove trailing newline if present */
+    size_t len = strlen(buffer);
+    if (len > 0 && buffer[len - 1] == '\n') {
+        buffer[len - 1] = '\0';
     }
+    
+    switch (level) {
+        case LIBBPF_WARN:
+            log_warn("libbpf: %s", buffer);
+            break;
+        case LIBBPF_INFO:
+            log_info("libbpf: %s", buffer);
+            break;
+        case LIBBPF_DEBUG:
+            log_debug("libbpf: %s", buffer);
+            break;
+    }
+    
     return 0;
 }
 
@@ -74,17 +92,19 @@ struct ebpf_manager *ebpf_manager_create(void)
     
     mgr = calloc(1, sizeof(*mgr));
     if (!mgr) {
-        fprintf(stderr, "Error: Failed to allocate eBPF manager\n");
+        log_error("Failed to allocate eBPF manager");
         return NULL;
     }
     
     /* Create event buffer pool (1000 pre-allocated events) */
     mgr->event_pool = event_buffer_pool_create(1000);
     if (!mgr->event_pool) {
-        fprintf(stderr, "Error: Failed to create event buffer pool\n");
+        log_error("Failed to create event buffer pool");
         free(mgr);
         return NULL;
     }
+    
+    log_debug("eBPF manager created with event pool capacity: 1000");
     
     /* Set up libbpf logging */
     libbpf_set_print(libbpf_print_fn);
@@ -105,78 +125,89 @@ int ebpf_manager_load_programs(struct ebpf_manager *mgr)
     }
     
     if (mgr->programs_loaded) {
-        fprintf(stderr, "Warning: Programs already loaded\n");
+        log_warn("Programs already loaded");
         return 0;
     }
     
+    log_debug("Loading eBPF programs...");
+    
     /* Load file_open_trace program */
+    log_debug("Loading file_open_trace program...");
     mgr->file_open_skel = file_open_trace_bpf__open();
     if (!mgr->file_open_skel) {
-        fprintf(stderr, "Warning: Failed to open file_open_trace BPF skeleton\n");
+        log_warn("Failed to open file_open_trace BPF skeleton");
     } else {
         err = file_open_trace_bpf__load(mgr->file_open_skel);
         if (err) {
-            fprintf(stderr, "Warning: Failed to load file_open_trace BPF program: %d\n", err);
+            log_bpf_verifier_error("file_open_trace", err, "Check kernel logs for details");
             file_open_trace_bpf__destroy(mgr->file_open_skel);
             mgr->file_open_skel = NULL;
         } else {
             loaded_count++;
+            log_debug("file_open_trace program loaded successfully");
         }
     }
     
     /* Load lib_load_trace program */
+    log_debug("Loading lib_load_trace program...");
     mgr->lib_load_skel = lib_load_trace_bpf__open();
     if (!mgr->lib_load_skel) {
-        fprintf(stderr, "Warning: Failed to open lib_load_trace BPF skeleton\n");
+        log_warn("Failed to open lib_load_trace BPF skeleton");
     } else {
         err = lib_load_trace_bpf__load(mgr->lib_load_skel);
         if (err) {
-            fprintf(stderr, "Warning: Failed to load lib_load_trace BPF program: %d\n", err);
+            log_bpf_verifier_error("lib_load_trace", err, "Check kernel logs for details");
             lib_load_trace_bpf__destroy(mgr->lib_load_skel);
             mgr->lib_load_skel = NULL;
         } else {
             loaded_count++;
+            log_debug("lib_load_trace program loaded successfully");
         }
     }
     
     /* Load process_exec_trace program */
+    log_debug("Loading process_exec_trace program...");
     mgr->process_exec_skel = process_exec_trace_bpf__open();
     if (!mgr->process_exec_skel) {
-        fprintf(stderr, "Warning: Failed to open process_exec_trace BPF skeleton\n");
+        log_warn("Failed to open process_exec_trace BPF skeleton");
     } else {
         err = process_exec_trace_bpf__load(mgr->process_exec_skel);
         if (err) {
-            fprintf(stderr, "Warning: Failed to load process_exec_trace BPF program: %d\n", err);
+            log_bpf_verifier_error("process_exec_trace", err, "Check kernel logs for details");
             process_exec_trace_bpf__destroy(mgr->process_exec_skel);
             mgr->process_exec_skel = NULL;
         } else {
             loaded_count++;
+            log_debug("process_exec_trace program loaded successfully");
         }
     }
     
     /* Load process_exit_trace program */
+    log_debug("Loading process_exit_trace program...");
     mgr->process_exit_skel = process_exit_trace_bpf__open();
     if (!mgr->process_exit_skel) {
-        fprintf(stderr, "Warning: Failed to open process_exit_trace BPF skeleton\n");
+        log_warn("Failed to open process_exit_trace BPF skeleton");
     } else {
         err = process_exit_trace_bpf__load(mgr->process_exit_skel);
         if (err) {
-            fprintf(stderr, "Warning: Failed to load process_exit_trace BPF program: %d\n", err);
+            log_bpf_verifier_error("process_exit_trace", err, "Check kernel logs for details");
             process_exit_trace_bpf__destroy(mgr->process_exit_skel);
             mgr->process_exit_skel = NULL;
         } else {
             loaded_count++;
+            log_debug("process_exit_trace program loaded successfully");
         }
     }
     
     /* Load openssl_api_trace program (optional) */
+    log_debug("Loading openssl_api_trace program (optional)...");
     mgr->openssl_api_skel = openssl_api_trace_bpf__open();
     if (!mgr->openssl_api_skel) {
-        fprintf(stderr, "Info: OpenSSL API tracing not available (optional feature)\n");
+        log_info("OpenSSL API tracing not available (optional feature)");
     } else {
         err = openssl_api_trace_bpf__load(mgr->openssl_api_skel);
         if (err) {
-            fprintf(stderr, "Info: OpenSSL API tracing not loaded (optional feature): %d\n", err);
+            log_info("OpenSSL API tracing not loaded (optional feature, error: %d)", err);
             openssl_api_trace_bpf__destroy(mgr->openssl_api_skel);
             mgr->openssl_api_skel = NULL;
         } else {
@@ -186,12 +217,13 @@ int ebpf_manager_load_programs(struct ebpf_manager *mgr)
     
     /* Check if at least core programs loaded */
     if (loaded_count == 0) {
-        fprintf(stderr, "Error: Failed to load any eBPF programs\n");
+        log_error_with_suggestion("Failed to load any eBPF programs",
+                                   "Check kernel version (requires 4.15+) and BPF support");
         return -1;
     }
     
     mgr->programs_loaded = true;
-    printf("Successfully loaded %d eBPF program(s)\n", loaded_count);
+    log_info("Successfully loaded %d eBPF program(s)", loaded_count);
     
     return 0;
 }
@@ -209,72 +241,84 @@ int ebpf_manager_attach_programs(struct ebpf_manager *mgr)
     }
     
     if (!mgr->programs_loaded) {
-        fprintf(stderr, "Error: Programs not loaded yet\n");
+        log_error("Programs not loaded yet");
         return -1;
     }
     
     if (mgr->programs_attached) {
-        fprintf(stderr, "Warning: Programs already attached\n");
+        log_warn("Programs already attached");
         return 0;
     }
     
+    log_debug("Attaching eBPF programs...");
+    
     /* Attach file_open_trace program */
     if (mgr->file_open_skel) {
+        log_debug("Attaching file_open_trace...");
         err = file_open_trace_bpf__attach(mgr->file_open_skel);
         if (err) {
-            fprintf(stderr, "Warning: Failed to attach file_open_trace: %d\n", err);
+            log_warn("Failed to attach file_open_trace: %d", err);
         } else {
             attached_count++;
+            log_debug("file_open_trace attached successfully");
         }
     }
     
     /* Attach lib_load_trace program */
     if (mgr->lib_load_skel) {
+        log_debug("Attaching lib_load_trace...");
         err = lib_load_trace_bpf__attach(mgr->lib_load_skel);
         if (err) {
-            fprintf(stderr, "Warning: Failed to attach lib_load_trace: %d\n", err);
+            log_warn("Failed to attach lib_load_trace: %d", err);
         } else {
             attached_count++;
+            log_debug("lib_load_trace attached successfully");
         }
     }
     
     /* Attach process_exec_trace program */
     if (mgr->process_exec_skel) {
+        log_debug("Attaching process_exec_trace...");
         err = process_exec_trace_bpf__attach(mgr->process_exec_skel);
         if (err) {
-            fprintf(stderr, "Warning: Failed to attach process_exec_trace: %d\n", err);
+            log_warn("Failed to attach process_exec_trace: %d", err);
         } else {
             attached_count++;
+            log_debug("process_exec_trace attached successfully");
         }
     }
     
     /* Attach process_exit_trace program */
     if (mgr->process_exit_skel) {
+        log_debug("Attaching process_exit_trace...");
         err = process_exit_trace_bpf__attach(mgr->process_exit_skel);
         if (err) {
-            fprintf(stderr, "Warning: Failed to attach process_exit_trace: %d\n", err);
+            log_warn("Failed to attach process_exit_trace: %d", err);
         } else {
             attached_count++;
+            log_debug("process_exit_trace attached successfully");
         }
     }
     
     /* Attach openssl_api_trace program (optional) */
     if (mgr->openssl_api_skel) {
+        log_debug("Attaching openssl_api_trace (optional)...");
         err = openssl_api_trace_bpf__attach(mgr->openssl_api_skel);
         if (err) {
-            fprintf(stderr, "Info: OpenSSL API tracing not attached (optional): %d\n", err);
+            log_info("OpenSSL API tracing not attached (optional): %d", err);
         } else {
             attached_count++;
+            log_debug("openssl_api_trace attached successfully");
         }
     }
     
     if (attached_count == 0) {
-        fprintf(stderr, "Error: Failed to attach any eBPF programs\n");
+        log_error("Failed to attach any eBPF programs");
         return -1;
     }
     
     mgr->programs_attached = true;
-    printf("Successfully attached %d eBPF program(s)\n", attached_count);
+    log_info("Successfully attached %d eBPF program(s)", attached_count);
     
     return 0;
 }
@@ -515,7 +559,8 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
         static uint64_t last_warning = 0;
         uint64_t now = header->timestamp_ns;
         if (now - last_warning > 1000000000ULL) { /* 1 second */
-            fprintf(stderr, "Warning: Event processing backpressure detected\n");
+            log_warn("Event processing backpressure detected (batch size: %d)",
+                     batch_ctx->events_in_batch);
             last_warning = now;
         }
     }
@@ -558,7 +603,7 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
             break;
             
         default:
-            fprintf(stderr, "Warning: Unknown event type: %u\n", header->event_type);
+            log_warn("Unknown event type: %u", header->event_type);
             break;
     }
     
@@ -591,14 +636,16 @@ static int setup_ring_buffer(struct ebpf_manager *mgr, event_callback_t callback
     }
     
     if (ring_buffer_fd < 0) {
-        fprintf(stderr, "Error: Failed to get ring buffer FD\n");
+        log_error("Failed to get ring buffer FD");
         return -1;
     }
+    
+    log_debug("Ring buffer FD: %d", ring_buffer_fd);
     
     /* Allocate batch context */
     mgr->batch_ctx = calloc(1, sizeof(*mgr->batch_ctx));
     if (!mgr->batch_ctx) {
-        fprintf(stderr, "Error: Failed to allocate batch context\n");
+        log_error("Failed to allocate batch context");
         return -1;
     }
     
@@ -611,11 +658,13 @@ static int setup_ring_buffer(struct ebpf_manager *mgr, event_callback_t callback
     /* Create ring buffer manager */
     mgr->rb = ring_buffer__new(ring_buffer_fd, handle_event, mgr->batch_ctx, NULL);
     if (!mgr->rb) {
-        fprintf(stderr, "Error: Failed to create ring buffer: %s\n", strerror(errno));
+        log_system_error("Failed to create ring buffer");
         free(mgr->batch_ctx);
         mgr->batch_ctx = NULL;
         return -1;
     }
+    
+    log_debug("Ring buffer created successfully");
     
     return 0;
 }
@@ -649,7 +698,7 @@ int ebpf_manager_poll_events(struct ebpf_manager *mgr, event_callback_t callback
      * This will process up to max_batch_size events per call */
     err = ring_buffer__poll(mgr->rb, 10);
     if (err < 0 && err != -EINTR) {
-        fprintf(stderr, "Error polling ring buffer: %d\n", err);
+        log_error("Error polling ring buffer: %d", err);
         return err;
     }
     
@@ -657,8 +706,8 @@ int ebpf_manager_poll_events(struct ebpf_manager *mgr, event_callback_t callback
     if (mgr->events_dropped > 0) {
         static uint64_t last_drop_count = 0;
         if (mgr->events_dropped != last_drop_count) {
-            fprintf(stderr, "Warning: %lu events dropped due to backpressure\n",
-                   mgr->events_dropped - last_drop_count);
+            log_warn("%lu events dropped due to backpressure",
+                     mgr->events_dropped - last_drop_count);
             last_drop_count = mgr->events_dropped;
         }
     }
@@ -746,7 +795,9 @@ void ebpf_manager_cleanup(struct ebpf_manager *mgr)
     sigaction(SIGALRM, &old_sa, NULL);
     
     if (cleanup_timeout) {
-        fprintf(stderr, "Warning: Cleanup timeout reached, some resources may not be freed\n");
+        log_warn("Cleanup timeout reached, some resources may not be freed");
+    } else {
+        log_debug("eBPF manager cleanup completed successfully");
     }
     
     mgr->programs_loaded = false;
