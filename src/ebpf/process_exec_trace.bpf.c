@@ -6,6 +6,7 @@
 /**
  * process_exec_trace.bpf.c - eBPF program for tracing process execution
  * Monitors sched_process_exec tracepoint for new process execution
+ * NOTE: Simplified to avoid BPF verifier issues with complex cmdline reading
  */
 
 #include "vmlinux.h"
@@ -22,78 +23,20 @@ struct {
     __uint(max_entries, 1 << 20); /* 1MB */
 } events SEC(".maps");
 
-/* Helper function to read command line from task */
-static __always_inline void read_cmdline(struct task_struct *task, char *cmdline, int max_len) {
-    struct mm_struct *mm;
-    unsigned long arg_start, arg_end;
-    int len;
-    
-    /* Read mm_struct pointer */
-    mm = BPF_CORE_READ(task, mm);
-    if (!mm) {
-        cmdline[0] = '\0';
-        return;
-    }
-    
-    /* Read command line boundaries */
-    arg_start = BPF_CORE_READ(mm, arg_start);
-    arg_end = BPF_CORE_READ(mm, arg_end);
-    
-    /* Calculate length and truncate if needed */
-    len = arg_end - arg_start;
-    if (len <= 0) {
-        cmdline[0] = '\0';
-        return;
-    }
-    
-    if (len > max_len - 1) {
-        len = max_len - 1;
-    }
-    
-    /* Read command line from user space */
-    if (bpf_probe_read_user(cmdline, len, (void *)arg_start) < 0) {
-        cmdline[0] = '\0';
-        return;
-    }
-    
-    /* Replace null bytes with spaces for readability */
-    for (int i = 0; i < len && i < max_len - 1; i++) {
-        if (cmdline[i] == '\0') {
-            cmdline[i] = ' ';
-        }
-    }
-    
-    /* Ensure null termination */
-    cmdline[len] = '\0';
-}
-
 /* Tracepoint for sched_process_exec
  * This fires when a process successfully executes a new program
+ * Cmdline reading simplified - user-space can read full cmdline from /proc if needed
  */
 SEC("tracepoint/sched/sched_process_exec")
 int trace_process_exec(void *ctx) {
     struct ct_process_exec_event *event;
-    struct task_struct *task;
+    struct task_struct *task, *parent;
     __u64 pid_tgid;
-    __u32 pid, ppid;
+    __u32 pid, ppid = 0;
     
-    /* Get current task */
-    task = (struct task_struct *)bpf_get_current_task();
-    if (!task) {
-        return 0;
-    }
-    
-    /* Get PID and PPID */
+    /* Get PID */
     pid_tgid = bpf_get_current_pid_tgid();
     pid = pid_tgid >> 32;
-    
-    /* Read PPID from task structure */
-    struct task_struct *parent = BPF_CORE_READ(task, real_parent);
-    if (parent) {
-        ppid = BPF_CORE_READ(parent, tgid);
-    } else {
-        ppid = 0;
-    }
     
     /* Reserve space in ring buffer */
     event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
@@ -107,14 +50,25 @@ int trace_process_exec(void *ctx) {
     event->header.uid = bpf_get_current_uid_gid() & 0xFFFFFFFF;
     event->header.event_type = CT_EVENT_PROCESS_EXEC;
     
-    /* Read process name (comm) */
+    /* Read process name (comm) - this is the most important part */
     bpf_get_current_comm(&event->header.comm, sizeof(event->header.comm));
+    
+    /* Get current task for PPID */
+    task = (struct task_struct *)bpf_get_current_task_btf();
+    if (task) {
+        /* Read PPID from task structure */
+        parent = BPF_CORE_READ(task, real_parent);
+        if (parent) {
+            ppid = BPF_CORE_READ(parent, tgid);
+        }
+    }
     
     /* Store PPID */
     event->ppid = ppid;
     
-    /* Read command line with safe truncation */
-    read_cmdline(task, event->cmdline, sizeof(event->cmdline));
+    /* Set cmdline to process name (comm) - user-space can read full cmdline from /proc if needed */
+    __builtin_memcpy(event->cmdline, event->header.comm, sizeof(event->header.comm));
+    event->cmdline[sizeof(event->header.comm)] = '\0';
     
     /* Submit event to ring buffer */
     bpf_ringbuf_submit(event, 0);

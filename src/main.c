@@ -25,6 +25,8 @@
 #include "include/ebpf_manager.h"
 #include "include/event_processor.h"
 #include "include/output_formatter.h"
+#include "include/profile_manager.h"
+#include "include/proc_scanner.h"
 
 /* Minimum supported kernel version */
 #define MIN_KERNEL_MAJOR 4
@@ -707,11 +709,29 @@ static int event_callback(processed_event_t *event, void *ctx) {
     /* Classify file type if this is a file_open event */
     if (event->file && event->event_type && strcmp(event->event_type, "file_open") == 0) {
         event->file_type = classify_crypto_file(event->file);
+        
+        /* Filter: Only keep crypto files (filtering moved from eBPF to user-space) */
+        if (event->file_type == FILE_TYPE_UNKNOWN) {
+            loop_ctx->events_filtered++;
+            return 0;  /* Not a crypto file, filter it out */
+        }
     }
     
     /* Extract library name if this is a lib_load event */
     if (event->library && event->event_type && strcmp(event->event_type, "lib_load") == 0) {
         event->library_name = extract_library_name(event->library);
+        
+        /* Filter: Only keep crypto libraries (filtering moved from eBPF to user-space) */
+        if (!event->library_name || 
+            (strstr(event->library, "libssl") == NULL &&
+             strstr(event->library, "libcrypto") == NULL &&
+             strstr(event->library, "libgnutls") == NULL &&
+             strstr(event->library, "libsodium") == NULL &&
+             strstr(event->library, "libnss3") == NULL &&
+             strstr(event->library, "libmbedtls") == NULL)) {
+            loop_ctx->events_filtered++;
+            return 0;  /* Not a crypto library, filter it out */
+        }
     }
     
     /* Apply privacy filtering */
@@ -913,14 +933,382 @@ cleanup:
 }
 
 /**
+ * Profile event callback context
+ */
+typedef struct {
+    event_processor_t *processor;
+    profile_manager_t *profile_mgr;
+    pid_t target_pid;
+    bool follow_children;
+    uint64_t events_processed;
+    uint64_t events_filtered;
+} profile_ctx_t;
+
+/**
+ * Profile event callback
+ * Processes events and adds them to the profile manager
+ */
+static int profile_event_callback(processed_event_t *event, void *ctx) {
+    profile_ctx_t *pctx = (profile_ctx_t *)ctx;
+    
+    if (!event || !pctx) {
+        return -1;
+    }
+    
+    pctx->events_processed++;
+    
+    /* Enrich event with process metadata */
+    enrich_event(event);
+    
+    /* Classify file type if this is a file_open event */
+    if (event->file && event->event_type && strcmp(event->event_type, "file_open") == 0) {
+        event->file_type = classify_crypto_file(event->file);
+        
+        /* Filter: Only keep crypto files (filtering moved from eBPF to user-space) */
+        if (event->file_type == FILE_TYPE_UNKNOWN) {
+            pctx->events_filtered++;
+            return 0;  /* Not a crypto file, filter it out */
+        }
+    }
+    
+    /* Extract library name if this is a lib_load event */
+    if (event->library && event->event_type && strcmp(event->event_type, "lib_load") == 0) {
+        event->library_name = extract_library_name(event->library);
+        
+        /* Filter: Only keep crypto libraries (filtering moved from eBPF to user-space) */
+        if (!event->library_name || 
+            (strstr(event->library, "libssl") == NULL &&
+             strstr(event->library, "libcrypto") == NULL &&
+             strstr(event->library, "libgnutls") == NULL &&
+             strstr(event->library, "libsodium") == NULL &&
+             strstr(event->library, "libnss3") == NULL &&
+             strstr(event->library, "libmbedtls") == NULL)) {
+            pctx->events_filtered++;
+            return 0;  /* Not a crypto library, filter it out */
+        }
+    }
+    
+    /* Apply privacy filtering */
+    apply_privacy_filter(event, pctx->processor->redact_paths);
+    
+    /* Requirement 2.1: Filter by target PID */
+    /* Requirement 2.4: Include child processes if follow_children enabled */
+    bool matches_target = (event->pid == pctx->target_pid);
+    
+    /* TODO: Implement child process tracking for follow_children */
+    /* For now, we only track the target PID */
+    
+    if (!matches_target) {
+        pctx->events_filtered++;
+        return 0;  /* Event filtered out */
+    }
+    
+    /* Check if event matches other filters */
+    if (!event_processor_matches_filters(pctx->processor, event)) {
+        pctx->events_filtered++;
+        return 0;  /* Event filtered out */
+    }
+    
+    /* Add event to profile manager */
+    if (profile_manager_add_event(pctx->profile_mgr, event) != 0) {
+        log_warn("Failed to add event to profile");
+    }
+    
+    return 0;
+}
+
+/**
  * Execute profile command
  * Requirement: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6
- * Note: Full implementation will be in Task 16
  */
 static int execute_profile_command(cli_args_t *args) {
-    (void)args;
-    log_info("Profile command not yet fully implemented (Task 16)");
-    return EXIT_SUCCESS;
+    struct ebpf_manager *mgr = NULL;
+    event_processor_t *processor = NULL;
+    output_formatter_t *formatter = NULL;
+    profile_manager_t *profile_mgr = NULL;
+    proc_scanner_t *scanner = NULL;
+    FILE *output_file = NULL;
+    time_t start_time, current_time;
+    int ret = EXIT_SUCCESS;
+    pid_t target_pid = args->pid;
+    bool process_found = false;
+    bool process_exited = false;
+    uint64_t events_processed_total = 0;
+    uint64_t events_dropped_total = 0;
+    
+    log_info("Starting profile command");
+    
+    /* Requirement 2.1: Resolve process name to PID if needed */
+    if (target_pid == 0 && args->process_name) {
+        log_debug("Resolving process name '%s' to PID...", args->process_name);
+        
+        scanner = proc_scanner_create();
+        if (!scanner) {
+            log_error("Failed to create proc scanner");
+            return EXIT_GENERAL_ERROR;
+        }
+        
+        process_list_t proc_list;
+        process_list_init(&proc_list);
+        
+        if (proc_scanner_scan_processes(scanner, &proc_list) == 0) {
+            /* Find first process matching the name */
+            for (size_t i = 0; i < proc_list.count; i++) {
+                if (strstr(proc_list.processes[i].comm, args->process_name) != NULL) {
+                    target_pid = proc_list.processes[i].pid;
+                    process_found = true;
+                    log_info("Found process '%s' with PID %d", args->process_name, target_pid);
+                    break;
+                }
+            }
+        }
+        
+        process_list_free(&proc_list);
+        
+        if (!process_found) {
+            log_error("Process '%s' not found", args->process_name);
+            proc_scanner_destroy(scanner);
+            return EXIT_GENERAL_ERROR;
+        }
+    } else {
+        target_pid = args->pid;
+    }
+    
+    /* Verify target process exists */
+    if (!scanner) {
+        scanner = proc_scanner_create();
+        if (!scanner) {
+            log_error("Failed to create proc scanner");
+            return EXIT_GENERAL_ERROR;
+        }
+    }
+    
+    process_info_t proc_info;
+    if (proc_scanner_get_process_info(scanner, target_pid, &proc_info) != 0) {
+        log_error("Target process (PID %d) not found or not accessible", target_pid);
+        proc_scanner_destroy(scanner);
+        return EXIT_GENERAL_ERROR;
+    }
+    
+    log_info("Profiling process: %s (PID %d)", proc_info.comm, target_pid);
+    log_info("Profile duration: %d seconds", args->duration);
+    
+    /* Initialize components */
+    log_debug("Initializing components...");
+    
+    /* Create eBPF manager */
+    mgr = ebpf_manager_create();
+    if (!mgr) {
+        log_error("Failed to create eBPF manager");
+        proc_scanner_destroy(scanner);
+        return EXIT_BPF_ERROR;
+    }
+    log_debug("eBPF manager created");
+    
+    /* Create event processor with PID filter */
+    processor = event_processor_create(args);
+    if (!processor) {
+        log_error("Failed to create event processor");
+        ebpf_manager_destroy(mgr);
+        proc_scanner_destroy(scanner);
+        return EXIT_GENERAL_ERROR;
+    }
+    log_debug("Event processor created");
+    
+    /* Create profile manager */
+    profile_mgr = profile_manager_create();
+    if (!profile_mgr) {
+        log_error("Failed to create profile manager");
+        event_processor_destroy(processor);
+        ebpf_manager_destroy(mgr);
+        proc_scanner_destroy(scanner);
+        return EXIT_GENERAL_ERROR;
+    }
+    log_debug("Profile manager created");
+    
+    /* Open output file if specified */
+    if (args->output_file) {
+        output_file = fopen(args->output_file, "w");
+        if (!output_file) {
+            log_error("Failed to open output file: %s", args->output_file);
+            log_system_error("fopen");
+            profile_manager_destroy(profile_mgr);
+            event_processor_destroy(processor);
+            ebpf_manager_destroy(mgr);
+            proc_scanner_destroy(scanner);
+            return EXIT_GENERAL_ERROR;
+        }
+        log_debug("Output file opened: %s", args->output_file);
+    } else {
+        output_file = stdout;
+    }
+    
+    /* Create output formatter */
+    formatter = output_formatter_create(args->format, output_file);
+    if (!formatter) {
+        log_error("Failed to create output formatter");
+        if (args->output_file && output_file) {
+            fclose(output_file);
+        }
+        profile_manager_destroy(profile_mgr);
+        event_processor_destroy(processor);
+        ebpf_manager_destroy(mgr);
+        proc_scanner_destroy(scanner);
+        return EXIT_GENERAL_ERROR;
+    }
+    log_debug("Output formatter created");
+    
+    /* Load eBPF programs */
+    log_debug("Loading eBPF programs...");
+    ret = ebpf_manager_load_programs(mgr);
+    if (ret != 0) {
+        log_error("Failed to load eBPF programs");
+        ret = EXIT_BPF_ERROR;
+        goto cleanup;
+    }
+    log_info("eBPF programs loaded successfully");
+    
+    /* Attach eBPF programs */
+    log_debug("Attaching eBPF programs...");
+    ret = ebpf_manager_attach_programs(mgr);
+    if (ret != 0) {
+        log_error("Failed to attach eBPF programs");
+        ret = EXIT_BPF_ERROR;
+        goto cleanup;
+    }
+    log_info("eBPF programs attached successfully");
+    
+    log_info("Profiling started");
+    
+    /* Record start time */
+    start_time = time(NULL);
+    
+    /* Setup profile event callback context */
+    profile_ctx_t profile_ctx = {
+        .processor = processor,
+        .profile_mgr = profile_mgr,
+        .target_pid = target_pid,
+        .follow_children = args->follow_children,
+        .events_processed = 0,
+        .events_filtered = 0
+    };
+    
+    /* Main profiling loop */
+    log_debug("Entering profiling loop");
+    
+    while (!is_shutdown_requested()) {
+        /* Poll events from ring buffer */
+        ret = ebpf_manager_poll_events(mgr, profile_event_callback, &profile_ctx);
+        if (ret < 0 && ret != -EINTR) {
+            log_error("Error polling events: %d", ret);
+            break;
+        }
+        
+        /* Requirement 2.3: Check if target process still exists */
+        if (proc_scanner_get_process_info(scanner, target_pid, &proc_info) != 0) {
+            log_info("Target process (PID %d) has exited", target_pid);
+            process_exited = true;
+            break;
+        }
+        
+        /* Check duration limit */
+        current_time = time(NULL);
+        if (difftime(current_time, start_time) >= args->duration) {
+            log_debug("Profile duration reached (%d seconds)", args->duration);
+            break;
+        }
+    }
+    
+    /* Process remaining events */
+    if (is_shutdown_requested() || process_exited) {
+        log_debug("Processing remaining events...");
+        time_t shutdown_start = time(NULL);
+        while (difftime(time(NULL), shutdown_start) < 1.0) {
+            ret = ebpf_manager_poll_events(mgr, profile_event_callback, &profile_ctx);
+            if (ret < 0 && ret != -EINTR) {
+                break;
+            }
+            if (ret == 0) {
+                break;
+            }
+        }
+    }
+    
+    /* Get final statistics */
+    ebpf_manager_get_stats(mgr, &events_processed_total, &events_dropped_total);
+    
+    /* Requirement 2.2, 2.5: Generate complete profile document */
+    log_info("Generating profile...");
+    
+    int actual_duration = (int)difftime(time(NULL), start_time);
+    profile_t *profile = profile_manager_finalize_profile(profile_mgr, target_pid, actual_duration);
+    
+    if (profile) {
+        /* Requirement 2.3: Output partial results if process exited */
+        if (process_exited) {
+            log_info("Profile generated (partial - process exited during profiling)");
+        } else {
+            log_info("Profile generated successfully");
+        }
+        
+        /* Write profile to output */
+        if (output_formatter_write_profile(formatter, profile) != 0) {
+            log_error("Failed to write profile to output");
+            ret = EXIT_GENERAL_ERROR;
+        }
+        
+        /* Free profile */
+        profile_free(profile);
+    } else {
+        log_warn("No profile data collected for PID %d", target_pid);
+        ret = EXIT_GENERAL_ERROR;
+    }
+    
+    /* Log statistics */
+    log_info("Profiling complete");
+    log_info("Events processed: %lu", profile_ctx.events_processed);
+    log_info("Events filtered: %lu", profile_ctx.events_filtered);
+    log_info("Events dropped: %lu", events_dropped_total);
+    
+    ret = EXIT_SUCCESS;
+    
+cleanup:
+    log_debug("Cleaning up resources...");
+    
+    /* Cleanup eBPF manager */
+    if (mgr) {
+        ebpf_manager_cleanup(mgr);
+        ebpf_manager_destroy(mgr);
+    }
+    
+    /* Cleanup output formatter */
+    if (formatter) {
+        output_formatter_destroy(formatter);
+    }
+    
+    /* Close output file if we opened it */
+    if (args->output_file && output_file && output_file != stdout) {
+        fclose(output_file);
+    }
+    
+    /* Cleanup profile manager */
+    if (profile_mgr) {
+        profile_manager_destroy(profile_mgr);
+    }
+    
+    /* Cleanup event processor */
+    if (processor) {
+        event_processor_destroy(processor);
+    }
+    
+    /* Cleanup proc scanner */
+    if (scanner) {
+        proc_scanner_destroy(scanner);
+    }
+    
+    log_debug("Cleanup complete");
+    
+    return ret;
 }
 
 /**
