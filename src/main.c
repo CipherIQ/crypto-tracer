@@ -8,6 +8,7 @@
  * Standalone eBPF-based command-line tool for monitoring cryptographic operations
  */
 
+#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,6 +18,7 @@
 #include <sys/utsname.h>
 #include <errno.h>
 #include <limits.h>
+#include <signal.h>
 #include "include/crypto_tracer.h"
 
 /* Minimum supported kernel version */
@@ -36,6 +38,9 @@
 #define DEFAULT_DURATION 0           /* Unlimited */
 #define DEFAULT_PROFILE_DURATION 30  /* 30 seconds for profile command */
 #define DEFAULT_FORMAT FORMAT_JSON_STREAM
+
+/* External shutdown flag from signal_handler.c */
+extern volatile sig_atomic_t shutdown_requested;
 
 /**
  * Print version information
@@ -694,6 +699,12 @@ int main(int argc, char **argv) {
     
     /* Check kernel version and compatibility */
     ret = check_kernel_version();
+    if (ret != EXIT_SUCCESS) {
+        return ret;
+    }
+    
+    /* Setup signal handlers for graceful shutdown */
+    ret = setup_signal_handlers();
     if (ret != EXIT_SUCCESS) {
         return ret;
     }

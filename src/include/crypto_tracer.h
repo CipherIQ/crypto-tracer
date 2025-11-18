@@ -192,6 +192,7 @@ void print_command_help(command_type_t cmd);
 int validate_privileges(void);
 int check_kernel_version(void);
 int setup_signal_handlers(void);
+bool is_shutdown_requested(void);
 
 /* Event buffer pool functions */
 event_buffer_pool_t *event_buffer_pool_create(size_t capacity);
