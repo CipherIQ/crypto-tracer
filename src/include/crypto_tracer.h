@@ -26,14 +26,53 @@
 #define EXIT_KERNEL_ERROR 4
 #define EXIT_BPF_ERROR 5
 
+/* Command types */
+typedef enum {
+    CMD_NONE = 0,
+    CMD_MONITOR,
+    CMD_PROFILE,
+    CMD_SNAPSHOT,
+    CMD_LIBS,
+    CMD_FILES,
+    CMD_HELP,
+    CMD_VERSION
+} command_type_t;
+
+/* Output format types */
+typedef enum {
+    FORMAT_JSON_STREAM = 0,
+    FORMAT_JSON_ARRAY,
+    FORMAT_JSON_PRETTY,
+    FORMAT_SUMMARY
+} output_format_t;
+
+/* Command-line arguments structure */
+typedef struct cli_args {
+    command_type_t command;
+    int duration;                  /* Duration in seconds (0 = unlimited) */
+    char *output_file;             /* Output file path (NULL = stdout) */
+    output_format_t format;        /* Output format */
+    int pid;                       /* Target PID (0 = all processes) */
+    char *process_name;            /* Target process name (NULL = all) */
+    char *library_filter;          /* Library name filter (NULL = all) */
+    char *file_filter;             /* File path filter (NULL = all) */
+    bool verbose;                  /* Verbose output */
+    bool quiet;                    /* Quiet mode (minimal output) */
+    bool no_redact;                /* Disable privacy redaction */
+    bool follow_children;          /* Follow child processes */
+    bool exit_after_parse;         /* Exit immediately after parsing (for help/version) */
+} cli_args_t;
+
 /* Forward declarations */
-struct cli_args;
 struct ebpf_manager;
 struct event_processor;
 struct output_formatter;
 
 /* Function prototypes - will be implemented in later tasks */
-int parse_args(int argc, char **argv, struct cli_args *args);
+int parse_args(int argc, char **argv, cli_args_t *args);
+void print_usage(const char *program_name);
+void print_version(void);
+void print_command_help(command_type_t cmd);
 int validate_privileges(void);
 int check_kernel_version(void);
 int setup_signal_handlers(void);
