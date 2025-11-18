@@ -19,8 +19,12 @@
 #include <errno.h>
 #include <limits.h>
 #include <signal.h>
+#include <time.h>
 #include "include/crypto_tracer.h"
 #include "include/logger.h"
+#include "include/ebpf_manager.h"
+#include "include/event_processor.h"
+#include "include/output_formatter.h"
 
 /* Minimum supported kernel version */
 #define MIN_KERNEL_MAJOR 4
@@ -673,6 +677,316 @@ int check_kernel_version(void) {
     return EXIT_SUCCESS;
 }
 
+/**
+ * Event callback context for main event loop
+ */
+typedef struct {
+    event_processor_t *processor;
+    output_formatter_t *formatter;
+    uint64_t events_processed;
+    uint64_t events_filtered;
+} event_loop_ctx_t;
+
+/**
+ * Event callback for main event loop
+ * Processes, filters, enriches, and outputs events
+ * Requirements: 14.1, 14.2, 14.3, 14.4, 14.5, 14.6
+ */
+static int event_callback(processed_event_t *event, void *ctx) {
+    event_loop_ctx_t *loop_ctx = (event_loop_ctx_t *)ctx;
+    
+    if (!event || !loop_ctx) {
+        return -1;
+    }
+    
+    loop_ctx->events_processed++;
+    
+    /* Enrich event with process metadata from /proc */
+    enrich_event(event);
+    
+    /* Classify file type if this is a file_open event */
+    if (event->file && event->event_type && strcmp(event->event_type, "file_open") == 0) {
+        event->file_type = classify_crypto_file(event->file);
+    }
+    
+    /* Extract library name if this is a lib_load event */
+    if (event->library && event->event_type && strcmp(event->event_type, "lib_load") == 0) {
+        event->library_name = extract_library_name(event->library);
+    }
+    
+    /* Apply privacy filtering */
+    apply_privacy_filter(event, loop_ctx->processor->redact_paths);
+    
+    /* Check if event matches filters */
+    if (!event_processor_matches_filters(loop_ctx->processor, event)) {
+        loop_ctx->events_filtered++;
+        return 0;  /* Event filtered out */
+    }
+    
+    /* Write event to output */
+    if (output_formatter_write_event(loop_ctx->formatter, event) != 0) {
+        log_warn("Failed to write event to output");
+        return -1;
+    }
+    
+    return 0;
+}
+
+/**
+ * Execute monitor command
+ * Requirement: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7
+ * Requirements: 16.1, 16.2, 16.3, 16.4, 16.5
+ */
+static int execute_monitor_command(cli_args_t *args) {
+    struct ebpf_manager *mgr = NULL;
+    event_processor_t *processor = NULL;
+    output_formatter_t *formatter = NULL;
+    FILE *output_file = NULL;
+    event_loop_ctx_t loop_ctx = {0};
+    time_t start_time, current_time;
+    int ret = EXIT_SUCCESS;
+    uint64_t events_processed_total = 0;
+    uint64_t events_dropped_total = 0;
+    
+    log_info("Starting monitor command");
+    
+    /* Step 5: Initialize components */
+    log_debug("Initializing components...");
+    
+    /* Create eBPF manager */
+    mgr = ebpf_manager_create();
+    if (!mgr) {
+        log_error("Failed to create eBPF manager");
+        return EXIT_BPF_ERROR;
+    }
+    log_debug("eBPF manager created");
+    
+    /* Create event processor with filters */
+    processor = event_processor_create(args);
+    if (!processor) {
+        log_error("Failed to create event processor");
+        ebpf_manager_destroy(mgr);
+        return EXIT_GENERAL_ERROR;
+    }
+    log_debug("Event processor created");
+    
+    /* Open output file if specified */
+    if (args->output_file) {
+        output_file = fopen(args->output_file, "w");
+        if (!output_file) {
+            log_error("Failed to open output file: %s", args->output_file);
+            log_system_error("fopen");
+            event_processor_destroy(processor);
+            ebpf_manager_destroy(mgr);
+            return EXIT_GENERAL_ERROR;
+        }
+        log_debug("Output file opened: %s", args->output_file);
+    } else {
+        output_file = stdout;
+    }
+    
+    /* Create output formatter */
+    formatter = output_formatter_create(args->format, output_file);
+    if (!formatter) {
+        log_error("Failed to create output formatter");
+        if (args->output_file && output_file) {
+            fclose(output_file);
+        }
+        event_processor_destroy(processor);
+        ebpf_manager_destroy(mgr);
+        return EXIT_GENERAL_ERROR;
+    }
+    log_debug("Output formatter created");
+    
+    /* Step 6: Load eBPF programs */
+    log_debug("Loading eBPF programs...");
+    ret = ebpf_manager_load_programs(mgr);
+    if (ret != 0) {
+        log_error("Failed to load eBPF programs");
+        ret = EXIT_BPF_ERROR;
+        goto cleanup;
+    }
+    log_info("eBPF programs loaded successfully");
+    
+    /* Attach eBPF programs */
+    log_debug("Attaching eBPF programs...");
+    ret = ebpf_manager_attach_programs(mgr);
+    if (ret != 0) {
+        log_error("Failed to attach eBPF programs");
+        ret = EXIT_BPF_ERROR;
+        goto cleanup;
+    }
+    log_info("eBPF programs attached successfully");
+    
+    /* Step 7: Verify ready - at least core programs loaded */
+    log_debug("Verifying system ready...");
+    log_info("crypto-tracer ready, monitoring started");
+    
+    /* Setup event loop context */
+    loop_ctx.processor = processor;
+    loop_ctx.formatter = formatter;
+    loop_ctx.events_processed = 0;
+    loop_ctx.events_filtered = 0;
+    
+    /* Record start time */
+    start_time = time(NULL);
+    
+    /* Main event loop - single-threaded, event-driven */
+    /* Requirements: 16.1, 16.2 - Complete initialization in <2s, capture first event within 2s */
+    log_debug("Entering main event loop");
+    
+    while (!is_shutdown_requested()) {
+        /* Poll events from ring buffer (10ms timeout) */
+        /* Requirement: 14.1 - Poll ring buffer every 10ms */
+        /* Requirement: 14.2 - Process up to 100 events per iteration */
+        ret = ebpf_manager_poll_events(mgr, event_callback, &loop_ctx);
+        if (ret < 0 && ret != -EINTR) {
+            log_error("Error polling events: %d", ret);
+            break;
+        }
+        
+        /* Check duration limit */
+        if (args->duration > 0) {
+            current_time = time(NULL);
+            if (difftime(current_time, start_time) >= args->duration) {
+                log_debug("Duration limit reached (%d seconds)", args->duration);
+                break;
+            }
+        }
+    }
+    
+    /* Requirement: 16.4 - Process buffered events before exit (up to 1 second) */
+    if (is_shutdown_requested()) {
+        log_debug("Shutdown requested, processing remaining events...");
+        time_t shutdown_start = time(NULL);
+        while (difftime(time(NULL), shutdown_start) < 1.0) {
+            ret = ebpf_manager_poll_events(mgr, event_callback, &loop_ctx);
+            if (ret < 0 && ret != -EINTR) {
+                break;
+            }
+            /* If no events processed in last poll, we're done */
+            if (ret == 0) {
+                break;
+            }
+        }
+    }
+    
+    /* Get final statistics */
+    ebpf_manager_get_stats(mgr, &events_processed_total, &events_dropped_total);
+    
+    /* Log statistics */
+    log_info("Monitoring complete");
+    log_info("Events processed: %lu", loop_ctx.events_processed);
+    log_info("Events filtered: %lu", loop_ctx.events_filtered);
+    log_info("Events dropped: %lu", events_dropped_total);
+    
+    ret = EXIT_SUCCESS;
+    
+cleanup:
+    /* Requirement: 16.3, 16.4, 16.5 - Graceful shutdown with timeout protection */
+    log_debug("Cleaning up resources...");
+    
+    /* Cleanup eBPF manager (includes timeout protection) */
+    if (mgr) {
+        ebpf_manager_cleanup(mgr);
+        ebpf_manager_destroy(mgr);
+    }
+    
+    /* Cleanup output formatter */
+    if (formatter) {
+        output_formatter_destroy(formatter);
+    }
+    
+    /* Close output file if we opened it */
+    if (args->output_file && output_file && output_file != stdout) {
+        fclose(output_file);
+    }
+    
+    /* Cleanup event processor */
+    if (processor) {
+        event_processor_destroy(processor);
+    }
+    
+    log_debug("Cleanup complete");
+    
+    return ret;
+}
+
+/**
+ * Execute profile command
+ * Requirement: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6
+ * Note: Full implementation will be in Task 16
+ */
+static int execute_profile_command(cli_args_t *args) {
+    (void)args;
+    log_info("Profile command not yet fully implemented (Task 16)");
+    return EXIT_SUCCESS;
+}
+
+/**
+ * Execute snapshot command
+ * Requirement: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6
+ * Note: Full implementation will be in Task 17
+ */
+static int execute_snapshot_command(cli_args_t *args) {
+    (void)args;
+    log_info("Snapshot command not yet fully implemented (Task 17)");
+    return EXIT_SUCCESS;
+}
+
+/**
+ * Execute libs command
+ * Requirement: 4.1, 4.2, 4.3, 4.4
+ * Note: Full implementation will be in Task 18
+ */
+static int execute_libs_command(cli_args_t *args) {
+    (void)args;
+    log_info("Libs command not yet fully implemented (Task 18)");
+    return EXIT_SUCCESS;
+}
+
+/**
+ * Execute files command
+ * Requirement: 5.1, 5.2, 5.3, 5.4, 5.5
+ * Note: Full implementation will be in Task 18
+ */
+static int execute_files_command(cli_args_t *args) {
+    (void)args;
+    log_info("Files command not yet fully implemented (Task 18)");
+    return EXIT_SUCCESS;
+}
+
+/**
+ * Dispatch to appropriate command handler
+ * Requirements: 16.1, 16.2, 16.3, 16.4, 16.5
+ */
+static int dispatch_command(cli_args_t *args) {
+    if (!args) {
+        return EXIT_GENERAL_ERROR;
+    }
+    
+    switch (args->command) {
+        case CMD_MONITOR:
+            return execute_monitor_command(args);
+            
+        case CMD_PROFILE:
+            return execute_profile_command(args);
+            
+        case CMD_SNAPSHOT:
+            return execute_snapshot_command(args);
+            
+        case CMD_LIBS:
+            return execute_libs_command(args);
+            
+        case CMD_FILES:
+            return execute_files_command(args);
+            
+        default:
+            log_error("Unknown command: %d", args->command);
+            return EXIT_GENERAL_ERROR;
+    }
+}
+
 int main(int argc, char **argv) {
     int ret;
     cli_args_t args;
@@ -747,8 +1061,8 @@ int main(int argc, char **argv) {
         }
     }
     
-    /* TODO: Dispatch to command handlers (will be implemented in later tasks) */
-    log_info("Command parsing successful. Command execution not yet implemented.");
+    /* Dispatch to command handlers */
+    ret = dispatch_command(&args);
     
-    return EXIT_SUCCESS;
+    return ret;
 }
