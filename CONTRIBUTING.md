@@ -12,6 +12,7 @@ Thank you for your interest in contributing to crypto-tracer! This document prov
 6. [Submitting Changes](#submitting-changes)
 7. [Coding Standards](#coding-standards)
 8. [eBPF Development Guidelines](#ebpf-development-guidelines)
+9. [Creating Releases](#creating-releases)
 
 ## Code of Conduct
 
@@ -469,6 +470,134 @@ When making changes, update relevant documentation:
 ## License
 
 By contributing to crypto-tracer, you agree that your contributions will be licensed under the GPL-3.0-or-later license.
+
+---
+
+Thank you for contributing to crypto-tracer! 🎉
+
+
+## Creating Releases
+
+### Building Distribution Packages
+
+For creating official releases, always use static linking for maximum portability:
+
+```bash
+# Create static binary distribution package
+make package-static
+```
+
+This creates `build/package/crypto-tracer-1.0.0.tar.gz` containing:
+- Statically linked binary (~1.7MB, stripped)
+- Man page
+- Complete documentation
+- License file
+
+### Why Static Linking for Releases?
+
+**Advantages:**
+- ✅ Works across different Linux distributions
+- ✅ No dependency on system library versions
+- ✅ Users don't need to install libbpf, libelf, etc.
+- ✅ Single self-contained binary
+- ✅ Easier deployment
+
+**Note:** The binary is larger (~1.7MB vs ~200KB dynamic), but this is acceptable for the portability benefits.
+
+### Release Checklist
+
+Before creating a release:
+
+1. **Update version number** in `Makefile`:
+   ```makefile
+   VERSION := 1.0.0
+   ```
+
+2. **Run full test suite**:
+   ```bash
+   make clean
+   make test
+   ```
+
+3. **Build static package**:
+   ```bash
+   make package-static
+   ```
+
+4. **Test the package**:
+   ```bash
+   cd /tmp
+   tar xzf /path/to/crypto-tracer-1.0.0.tar.gz
+   cd crypto-tracer-1.0.0
+   sudo setcap cap_bpf,cap_perfmon+ep ./crypto-tracer
+   ./crypto-tracer snapshot
+   ```
+
+5. **Verify binary is static**:
+   ```bash
+   ldd ./crypto-tracer
+   # Should output: "not a dynamic executable"
+   ```
+
+6. **Create GitHub release**:
+   - Tag: `v1.0.0`
+   - Title: `crypto-tracer v1.0.0`
+   - Attach: `crypto-tracer-1.0.0.tar.gz`
+   - Include release notes
+
+### Release Notes Template
+
+```markdown
+## crypto-tracer v1.0.0
+
+### Features
+- List new features
+
+### Bug Fixes
+- List bug fixes
+
+### Installation
+
+Download and extract:
+\`\`\`bash
+tar xzf crypto-tracer-1.0.0.tar.gz
+cd crypto-tracer-1.0.0
+\`\`\`
+
+Grant capabilities:
+\`\`\`bash
+sudo setcap cap_bpf,cap_perfmon+ep ./crypto-tracer
+\`\`\`
+
+Run:
+\`\`\`bash
+./crypto-tracer snapshot
+\`\`\`
+
+See README.md for complete documentation.
+
+### Requirements
+- Linux kernel 4.15+ (5.8+ recommended)
+- CAP_BPF or CAP_SYS_ADMIN capability (or run with sudo)
+
+### Package Contents
+- Statically linked binary (1.7MB)
+- Man page
+- Complete documentation
+- License
+```
+
+### Distribution Channels
+
+**GitHub Releases:**
+- Primary distribution method
+- Attach tarball to release
+- Include checksums (SHA256)
+
+**Package Repositories (Future):**
+- Debian/Ubuntu: `.deb` package
+- RHEL/Fedora: `.rpm` package
+- Arch: AUR package
 
 ---
 

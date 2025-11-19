@@ -39,6 +39,8 @@ endif
 
 # Static linking option (can be enabled with STATIC=1)
 ifdef STATIC
+    LDFLAGS := -L/usr/lib/x86_64-linux-gnu
+    LDFLAGS += -lbpf -lelf -lz -lcap
     LDFLAGS += -static
     CFLAGS += -DSTATIC_BUILD
 endif

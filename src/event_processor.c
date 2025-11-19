@@ -117,7 +117,7 @@ int filter_set_add(filter_set_t *set, filter_type_t type, const void *value) {
  * @param string String to match against
  * @return true if matches, false otherwise
  */
-bool glob_match(const char *pattern, const char *string) {
+static bool crypto_glob_match(const char *pattern, const char *string) {
     if (!pattern || !string) {
         return false;
     }
@@ -208,7 +208,7 @@ static bool filter_matches_event(filter_t *filter, processed_event_t *event) {
         case FILTER_TYPE_FILE_PATH:
             /* Glob pattern match on file path */
             if (event->file) {
-                return glob_match(filter->value.file_pattern, event->file);
+                return crypto_glob_match(filter->value.file_pattern, event->file);
             }
             return false;
             

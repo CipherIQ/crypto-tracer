@@ -97,6 +97,42 @@ Produces a fully static binary with no external dependencies (except glibc/musl)
 | `config` | Show build configuration |
 | `debug` | Build with debug symbols |
 | `static` | Build with static linking |
+| `package` | Create distribution tarball |
+| `package-static` | Create static binary distribution (recommended) |
+
+### Creating Distribution Packages
+
+For distributing crypto-tracer to users, create a static binary package:
+
+```bash
+# Create portable static binary package (recommended)
+make package-static
+
+# This creates: build/package/crypto-tracer-1.0.0.tar.gz (~730KB)
+```
+
+The package includes:
+- Statically linked binary (works across distributions)
+- Man page (crypto-tracer.1)
+- Complete documentation (README, DEMO, TROUBLESHOOTING)
+- License file
+
+**Why static linking for distribution?**
+- ✅ Works across different Linux distributions
+- ✅ No dependency on system library versions
+- ✅ Single self-contained binary
+- ✅ Easier deployment and installation
+
+**Package contents:**
+```
+crypto-tracer-1.0.0/
+├── crypto-tracer          # Statically linked binary (~1.7MB)
+├── crypto-tracer.1        # Man page
+├── README.md              # User guide
+├── DEMO.md                # Usage examples
+├── TROUBLESHOOTING.md     # Troubleshooting guide
+└── LICENSE                # License file
+```
 
 ## Project Structure
 
