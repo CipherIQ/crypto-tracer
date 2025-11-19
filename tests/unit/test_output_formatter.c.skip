@@ -1,0 +1,484 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+/**
+ * Copyright (c) 2025 Graziano Labs Corp.
+ */
+
+/**
+ * test_output_formatter.c - Unit tests for JSON output formatting
+ * Tests JSON generation for all event types, profiles, and snapshots
+ * Requirements: 10.1, 10.2, 10.3, 10.4, 10.5, 10.6
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <assert.h>
+#include "../../src/include/output_formatter.h"
+#include "../../src/include/crypto_tracer.h"
+#include "../../src/include/event_processor.h"
+
+/* Test counter */
+static int tests_passed = 0;
+static int tests_failed = 0;
+
+#define TEST(name) \
+    do { \
+        printf("Running test: %s\n", name); \
+    } while (0)
+
+#define ASSERT_TRUE(condition, message) \
+    do { \
+        if (!(condition)) { \
+            printf("  FAILED: %s\n", message); \
+            tests_failed++; \
+            return; \
+        } \
+    } while (0)
+
+#define ASSERT_NOT_NULL(ptr, message) \
+    do { \
+        if ((ptr) == NULL) { \
+            printf("  FAILED: %s\n", message); \
+            tests_failed++; \
+            return; \
+        } \
+    } while (0)
+
+#define TEST_PASS() \
+    do { \
+        printf("  PASSED\n"); \
+        tests_passed++; \
+    } while (0)
+
+/**
+ * Helper: Check if string contains substring
+ */
+static bool contains(const char *haystack, const char *needle) {
+    return strstr(haystack, needle) != NULL;
+}
+
+/**
+ * Test: Create and destroy output formatter
+ */
+void test_formatter_create_destroy(void) {
+    TEST("formatter_create_destroy");
+    
+    FILE *output = tmpfile();
+    ASSERT_NOT_NULL(output, "tmpfile should succeed");
+    
+    output_formatter_t *formatter = output_formatter_create("json-stream", output);
+    ASSERT_NOT_NULL(formatter, "output_formatter_create should succeed");
+    
+    output_formatter_destroy(formatter);
+    fclose(output);
+    
+    TEST_PASS();
+}
+
+/**
+ * Test: Format file_open event as JSON
+ */
+void test_format_file_open_event(void) {
+    TEST("format_file_open_event");
+    
+    FILE *output = tmpfile();
+    ASSERT_NOT_NULL(output, "tmpfile should succeed");
+    
+    output_formatter_t *formatter = output_formatter_create("json-stream", output);
+    ASSERT_NOT_NULL(formatter, "output_formatter_create should succeed");
+    
+    /* Create test event */
+    processed_event_t event = {
+        .event_type = "file_open",
+        .timestamp = "2025-01-01T00:00:00.000000Z",
+        .pid = 1234,
+        .uid = 1000,
+        .process = "test_process",
+        .exe = "/usr/bin/test",
+        .file = "/etc/ssl/cert.pem",
+        .file_type = FILE_TYPE_CERTIFICATE,
+        .flags = "O_RDONLY"
+    };
+    
+    int result = output_formatter_write_event(formatter, &event);
+    ASSERT_TRUE(result == 0, "output_formatter_write_event should succeed");
+    
+    /* Read back and verify JSON */
+    rewind(output);
+    char buffer[4096];
+    fgets(buffer, sizeof(buffer), output);
+    
+    ASSERT_TRUE(contains(buffer, "\"event_type\":\"file_open\""), 
+                "JSON should contain event_type");
+    ASSERT_TRUE(contains(buffer, "\"pid\":1234"), 
+                "JSON should contain pid");
+    ASSERT_TRUE(contains(buffer, "\"file\":\"/etc/ssl/cert.pem\""), 
+                "JSON should contain file path");
+    ASSERT_TRUE(contains(buffer, "\"file_type\":\"certificate\""), 
+                "JSON should contain file_type");
+    
+    output_formatter_destroy(formatter);
+    fclose(output);
+    
+    TEST_PASS();
+}
+
+/**
+ * Test: Format lib_load event as JSON
+ */
+void test_format_lib_load_event(void) {
+    TEST("format_lib_load_event");
+    
+    FILE *output = tmpfile();
+    ASSERT_NOT_NULL(output, "tmpfile should succeed");
+    
+    output_formatter_t *formatter = output_formatter_create("json-stream", output);
+    ASSERT_NOT_NULL(formatter, "output_formatter_create should succeed");
+    
+    /* Create test event */
+    processed_event_t event = {
+        .event_type = "lib_load",
+        .timestamp = "2025-01-01T00:00:00.000000Z",
+        .pid = 1234,
+        .uid = 1000,
+        .process = "test_process",
+        .library = "/usr/lib/libssl.so.1.1",
+        .library_name = "libssl"
+    };
+    
+    int result = output_formatter_write_event(formatter, &event);
+    ASSERT_TRUE(result == 0, "output_formatter_write_event should succeed");
+    
+    /* Read back and verify JSON */
+    rewind(output);
+    char buffer[4096];
+    fgets(buffer, sizeof(buffer), output);
+    
+    ASSERT_TRUE(contains(buffer, "\"event_type\":\"lib_load\""), 
+                "JSON should contain event_type");
+    ASSERT_TRUE(contains(buffer, "\"library\":\"/usr/lib/libssl.so.1.1\""), 
+                "JSON should contain library path");
+    ASSERT_TRUE(contains(buffer, "\"library_name\":\"libssl\""), 
+                "JSON should contain library_name");
+    
+    output_formatter_destroy(formatter);
+    fclose(output);
+    
+    TEST_PASS();
+}
+
+/**
+ * Test: Format process_exec event as JSON
+ */
+void test_format_process_exec_event(void) {
+    TEST("format_process_exec_event");
+    
+    FILE *output = tmpfile();
+    ASSERT_NOT_NULL(output, "tmpfile should succeed");
+    
+    output_formatter_t *formatter = output_formatter_create("json-stream", output);
+    ASSERT_NOT_NULL(formatter, "output_formatter_create should succeed");
+    
+    /* Create test event */
+    processed_event_t event = {
+        .event_type = "process_exec",
+        .timestamp = "2025-01-01T00:00:00.000000Z",
+        .pid = 1234,
+        .ppid = 1000,
+        .uid = 1000,
+        .process = "test_process",
+        .exe = "/usr/bin/test",
+        .cmdline = "test --arg1 --arg2"
+    };
+    
+    int result = output_formatter_write_event(formatter, &event);
+    ASSERT_TRUE(result == 0, "output_formatter_write_event should succeed");
+    
+    /* Read back and verify JSON */
+    rewind(output);
+    char buffer[4096];
+    fgets(buffer, sizeof(buffer), output);
+    
+    ASSERT_TRUE(contains(buffer, "\"event_type\":\"process_exec\""), 
+                "JSON should contain event_type");
+    ASSERT_TRUE(contains(buffer, "\"ppid\":1000"), 
+                "JSON should contain ppid");
+    ASSERT_TRUE(contains(buffer, "\"cmdline\":\"test --arg1 --arg2\""), 
+                "JSON should contain cmdline");
+    
+    output_formatter_destroy(formatter);
+    fclose(output);
+    
+    TEST_PASS();
+}
+
+/**
+ * Test: Format process_exit event as JSON
+ */
+void test_format_process_exit_event(void) {
+    TEST("format_process_exit_event");
+    
+    FILE *output = tmpfile();
+    ASSERT_NOT_NULL(output, "tmpfile should succeed");
+    
+    output_formatter_t *formatter = output_formatter_create("json-stream", output);
+    ASSERT_NOT_NULL(formatter, "output_formatter_create should succeed");
+    
+    /* Create test event */
+    processed_event_t event = {
+        .event_type = "process_exit",
+        .timestamp = "2025-01-01T00:00:00.000000Z",
+        .pid = 1234,
+        .uid = 1000,
+        .process = "test_process",
+        .exit_code = 0
+    };
+    
+    int result = output_formatter_write_event(formatter, &event);
+    ASSERT_TRUE(result == 0, "output_formatter_write_event should succeed");
+    
+    /* Read back and verify JSON */
+    rewind(output);
+    char buffer[4096];
+    fgets(buffer, sizeof(buffer), output);
+    
+    ASSERT_TRUE(contains(buffer, "\"event_type\":\"process_exit\""), 
+                "JSON should contain event_type");
+    ASSERT_TRUE(contains(buffer, "\"exit_code\":0"), 
+                "JSON should contain exit_code");
+    
+    output_formatter_destroy(formatter);
+    fclose(output);
+    
+    TEST_PASS();
+}
+
+/**
+ * Test: Format api_call event as JSON
+ */
+void test_format_api_call_event(void) {
+    TEST("format_api_call_event");
+    
+    FILE *output = tmpfile();
+    ASSERT_NOT_NULL(output, "tmpfile should succeed");
+    
+    output_formatter_t *formatter = output_formatter_create("json-stream", output);
+    ASSERT_NOT_NULL(formatter, "output_formatter_create should succeed");
+    
+    /* Create test event */
+    processed_event_t event = {
+        .event_type = "api_call",
+        .timestamp = "2025-01-01T00:00:00.000000Z",
+        .pid = 1234,
+        .uid = 1000,
+        .process = "test_process",
+        .function_name = "SSL_connect",
+        .library = "/usr/lib/libssl.so.1.1"
+    };
+    
+    int result = output_formatter_write_event(formatter, &event);
+    ASSERT_TRUE(result == 0, "output_formatter_write_event should succeed");
+    
+    /* Read back and verify JSON */
+    rewind(output);
+    char buffer[4096];
+    fgets(buffer, sizeof(buffer), output);
+    
+    ASSERT_TRUE(contains(buffer, "\"event_type\":\"api_call\""), 
+                "JSON should contain event_type");
+    ASSERT_TRUE(contains(buffer, "\"function_name\":\"SSL_connect\""), 
+                "JSON should contain function_name");
+    
+    output_formatter_destroy(formatter);
+    fclose(output);
+    
+    TEST_PASS();
+}
+
+/**
+ * Test: ISO 8601 timestamp format
+ */
+void test_timestamp_format(void) {
+    TEST("timestamp_format");
+    
+    FILE *output = tmpfile();
+    ASSERT_NOT_NULL(output, "tmpfile should succeed");
+    
+    output_formatter_t *formatter = output_formatter_create("json-stream", output);
+    ASSERT_NOT_NULL(formatter, "output_formatter_create should succeed");
+    
+    /* Create test event with ISO 8601 timestamp */
+    processed_event_t event = {
+        .event_type = "file_open",
+        .timestamp = "2025-01-15T14:30:45.123456Z",
+        .pid = 1234,
+        .uid = 1000,
+        .process = "test",
+        .file = "/etc/ssl/cert.pem"
+    };
+    
+    output_formatter_write_event(formatter, &event);
+    
+    /* Read back and verify timestamp format */
+    rewind(output);
+    char buffer[4096];
+    fgets(buffer, sizeof(buffer), output);
+    
+    ASSERT_TRUE(contains(buffer, "\"timestamp\":\"2025-01-15T14:30:45.123456Z\""), 
+                "JSON should contain ISO 8601 timestamp with microseconds");
+    
+    output_formatter_destroy(formatter);
+    fclose(output);
+    
+    TEST_PASS();
+}
+
+/**
+ * Test: Multiple events in json-stream format
+ */
+void test_json_stream_format(void) {
+    TEST("json_stream_format");
+    
+    FILE *output = tmpfile();
+    ASSERT_NOT_NULL(output, "tmpfile should succeed");
+    
+    output_formatter_t *formatter = output_formatter_create("json-stream", output);
+    ASSERT_NOT_NULL(formatter, "output_formatter_create should succeed");
+    
+    /* Write multiple events */
+    for (int i = 0; i < 3; i++) {
+        processed_event_t event = {
+            .event_type = "file_open",
+            .timestamp = "2025-01-01T00:00:00.000000Z",
+            .pid = 1234 + i,
+            .uid = 1000,
+            .process = "test",
+            .file = "/etc/ssl/cert.pem"
+        };
+        output_formatter_write_event(formatter, &event);
+    }
+    
+    /* Read back and verify each line is valid JSON */
+    rewind(output);
+    char buffer[4096];
+    int line_count = 0;
+    while (fgets(buffer, sizeof(buffer), output) != NULL) {
+        ASSERT_TRUE(contains(buffer, "\"event_type\":\"file_open\""), 
+                    "Each line should be valid JSON");
+        line_count++;
+    }
+    
+    ASSERT_TRUE(line_count == 3, "Should have 3 lines of JSON");
+    
+    output_formatter_destroy(formatter);
+    fclose(output);
+    
+    TEST_PASS();
+}
+
+/**
+ * Test: Valid JSON output (parseable)
+ */
+void test_valid_json_output(void) {
+    TEST("valid_json_output");
+    
+    FILE *output = tmpfile();
+    ASSERT_NOT_NULL(output, "tmpfile should succeed");
+    
+    output_formatter_t *formatter = output_formatter_create("json-stream", output);
+    ASSERT_NOT_NULL(formatter, "output_formatter_create should succeed");
+    
+    /* Create event with special characters that need escaping */
+    processed_event_t event = {
+        .event_type = "file_open",
+        .timestamp = "2025-01-01T00:00:00.000000Z",
+        .pid = 1234,
+        .uid = 1000,
+        .process = "test",
+        .file = "/etc/ssl/\"quoted\".pem"  /* Contains quotes */
+    };
+    
+    output_formatter_write_event(formatter, &event);
+    
+    /* Read back and verify quotes are escaped */
+    rewind(output);
+    char buffer[4096];
+    fgets(buffer, sizeof(buffer), output);
+    
+    ASSERT_TRUE(contains(buffer, "\\\"quoted\\\""), 
+                "Quotes should be escaped in JSON");
+    
+    output_formatter_destroy(formatter);
+    fclose(output);
+    
+    TEST_PASS();
+}
+
+/**
+ * Test: NULL field handling
+ */
+void test_null_field_handling(void) {
+    TEST("null_field_handling");
+    
+    FILE *output = tmpfile();
+    ASSERT_NOT_NULL(output, "tmpfile should succeed");
+    
+    output_formatter_t *formatter = output_formatter_create("json-stream", output);
+    ASSERT_NOT_NULL(formatter, "output_formatter_create should succeed");
+    
+    /* Create event with NULL optional fields */
+    processed_event_t event = {
+        .event_type = "file_open",
+        .timestamp = "2025-01-01T00:00:00.000000Z",
+        .pid = 1234,
+        .uid = 1000,
+        .process = "test",
+        .file = "/etc/ssl/cert.pem",
+        .exe = NULL,  /* NULL field */
+        .cmdline = NULL  /* NULL field */
+    };
+    
+    int result = output_formatter_write_event(formatter, &event);
+    ASSERT_TRUE(result == 0, "Should handle NULL fields gracefully");
+    
+    output_formatter_destroy(formatter);
+    fclose(output);
+    
+    TEST_PASS();
+}
+
+/**
+ * Main test runner
+ */
+int main(void) {
+    printf("=== Output Formatter Unit Tests ===\n\n");
+    
+    /* Formatter lifecycle */
+    test_formatter_create_destroy();
+    
+    /* Event formatting tests */
+    test_format_file_open_event();
+    test_format_lib_load_event();
+    test_format_process_exec_event();
+    test_format_process_exit_event();
+    test_format_api_call_event();
+    
+    /* Format validation tests */
+    test_timestamp_format();
+    test_json_stream_format();
+    test_valid_json_output();
+    test_null_field_handling();
+    
+    /* Print summary */
+    printf("\n=== Test Summary ===\n");
+    printf("Tests passed: %d\n", tests_passed);
+    printf("Tests failed: %d\n", tests_failed);
+    
+    if (tests_failed > 0) {
+        printf("\nSome tests FAILED!\n");
+        return 1;
+    }
+    
+    printf("\nAll tests PASSED!\n");
+    return 0;
+}

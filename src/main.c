@@ -2119,21 +2119,26 @@ int main(int argc, char **argv) {
               args.command == CMD_LIBS ? "libs" :
               args.command == CMD_FILES ? "files" : "unknown");
     
-    /* Validate privileges */
-    log_debug("Validating privileges...");
-    ret = validate_privileges();
-    if (ret != EXIT_SUCCESS) {
-        return ret;
+    /* Validate privileges (not required for snapshot command) */
+    /* Requirement 3.6: Snapshot works without eBPF (using /proc only) */
+    if (args.command != CMD_SNAPSHOT) {
+        log_debug("Validating privileges...");
+        ret = validate_privileges();
+        if (ret != EXIT_SUCCESS) {
+            return ret;
+        }
+        log_debug("Privilege validation passed");
+        
+        /* Check kernel version and compatibility */
+        log_debug("Checking kernel version and compatibility...");
+        ret = check_kernel_version();
+        if (ret != EXIT_SUCCESS) {
+            return ret;
+        }
+        log_debug("Kernel compatibility check passed");
+    } else {
+        log_debug("Snapshot command - skipping privilege and kernel checks (uses /proc only)");
     }
-    log_debug("Privilege validation passed");
-    
-    /* Check kernel version and compatibility */
-    log_debug("Checking kernel version and compatibility...");
-    ret = check_kernel_version();
-    if (ret != EXIT_SUCCESS) {
-        return ret;
-    }
-    log_debug("Kernel compatibility check passed");
     
     /* Setup signal handlers for graceful shutdown */
     log_debug("Setting up signal handlers...");
