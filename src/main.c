@@ -994,7 +994,7 @@ static int profile_event_callback(processed_event_t *event, void *ctx) {
     
     /* Requirement 2.1: Filter by target PID */
     /* Requirement 2.4: Include child processes if follow_children enabled */
-    bool matches_target = (event->pid == pctx->target_pid);
+    bool matches_target = (event->pid == (uint32_t)pctx->target_pid);
     
     /* TODO: Implement child process tracking for follow_children */
     /* For now, we only track the target PID */
@@ -1572,25 +1572,487 @@ cleanup:
 }
 
 /**
+ * Libs event callback context
+ */
+typedef struct {
+    event_processor_t *processor;
+    output_formatter_t *formatter;
+    uint64_t events_processed;
+    uint64_t events_filtered;
+} libs_ctx_t;
+
+/**
+ * Libs event callback
+ * Processes only lib_load events and outputs them
+ */
+static int libs_event_callback(processed_event_t *event, void *ctx) {
+    libs_ctx_t *lctx = (libs_ctx_t *)ctx;
+    
+    if (!event || !lctx) {
+        return -1;
+    }
+    
+    lctx->events_processed++;
+    
+    /* Requirement 4.1: Only process lib_load events */
+    if (!event->event_type || strcmp(event->event_type, "lib_load") != 0) {
+        lctx->events_filtered++;
+        return 0;  /* Not a library load event, filter it out */
+    }
+    
+    /* Enrich event with process metadata */
+    enrich_event(event);
+    
+    /* Extract library name */
+    if (event->library) {
+        event->library_name = extract_library_name(event->library);
+        
+        /* Filter: Only keep crypto libraries (filtering moved from eBPF to user-space) */
+        if (!event->library_name || 
+            (strstr(event->library, "libssl") == NULL &&
+             strstr(event->library, "libcrypto") == NULL &&
+             strstr(event->library, "libgnutls") == NULL &&
+             strstr(event->library, "libsodium") == NULL &&
+             strstr(event->library, "libnss3") == NULL &&
+             strstr(event->library, "libmbedtls") == NULL)) {
+            lctx->events_filtered++;
+            return 0;  /* Not a crypto library, filter it out */
+        }
+    }
+    
+    /* Apply privacy filtering */
+    apply_privacy_filter(event, lctx->processor->redact_paths);
+    
+    /* Requirement 4.2: Apply library name filter if specified */
+    if (!event_processor_matches_filters(lctx->processor, event)) {
+        lctx->events_filtered++;
+        return 0;  /* Event filtered out */
+    }
+    
+    /* Requirement 4.4: Write event to output as JSON */
+    if (output_formatter_write_event(lctx->formatter, event) != 0) {
+        log_warn("Failed to write event to output");
+        return -1;
+    }
+    
+    return 0;
+}
+
+/**
  * Execute libs command
  * Requirement: 4.1, 4.2, 4.3, 4.4
- * Note: Full implementation will be in Task 18
+ * 
+ * Lists all loaded cryptographic libraries by monitoring lib_load events.
+ * Similar to monitor command but filtered to library events only.
  */
 static int execute_libs_command(cli_args_t *args) {
-    (void)args;
-    log_info("Libs command not yet fully implemented (Task 18)");
-    return EXIT_SUCCESS;
+    struct ebpf_manager *mgr = NULL;
+    event_processor_t *processor = NULL;
+    output_formatter_t *formatter = NULL;
+    FILE *output_file = NULL;
+    libs_ctx_t libs_ctx = {0};
+    time_t start_time, current_time;
+    int ret = EXIT_SUCCESS;
+    uint64_t events_processed_total = 0;
+    uint64_t events_dropped_total = 0;
+    
+    log_info("Starting libs command");
+    
+    /* Initialize components */
+    log_debug("Initializing components...");
+    
+    /* Create eBPF manager */
+    mgr = ebpf_manager_create();
+    if (!mgr) {
+        log_error("Failed to create eBPF manager");
+        return EXIT_BPF_ERROR;
+    }
+    log_debug("eBPF manager created");
+    
+    /* Create event processor with library filter */
+    processor = event_processor_create(args);
+    if (!processor) {
+        log_error("Failed to create event processor");
+        ebpf_manager_destroy(mgr);
+        return EXIT_GENERAL_ERROR;
+    }
+    log_debug("Event processor created");
+    
+    /* Open output file if specified */
+    if (args->output_file) {
+        output_file = fopen(args->output_file, "w");
+        if (!output_file) {
+            log_error("Failed to open output file: %s", args->output_file);
+            log_system_error("fopen");
+            event_processor_destroy(processor);
+            ebpf_manager_destroy(mgr);
+            return EXIT_GENERAL_ERROR;
+        }
+        log_debug("Output file opened: %s", args->output_file);
+    } else {
+        output_file = stdout;
+    }
+    
+    /* Create output formatter */
+    formatter = output_formatter_create(args->format, output_file);
+    if (!formatter) {
+        log_error("Failed to create output formatter");
+        if (args->output_file && output_file) {
+            fclose(output_file);
+        }
+        event_processor_destroy(processor);
+        ebpf_manager_destroy(mgr);
+        return EXIT_GENERAL_ERROR;
+    }
+    log_debug("Output formatter created");
+    
+    /* Load eBPF programs */
+    log_debug("Loading eBPF programs...");
+    ret = ebpf_manager_load_programs(mgr);
+    if (ret != 0) {
+        log_error("Failed to load eBPF programs");
+        ret = EXIT_BPF_ERROR;
+        goto cleanup;
+    }
+    log_info("eBPF programs loaded successfully");
+    
+    /* Attach eBPF programs */
+    log_debug("Attaching eBPF programs...");
+    ret = ebpf_manager_attach_programs(mgr);
+    if (ret != 0) {
+        log_error("Failed to attach eBPF programs");
+        ret = EXIT_BPF_ERROR;
+        goto cleanup;
+    }
+    log_info("eBPF programs attached successfully");
+    
+    log_info("Library monitoring started");
+    if (args->library_filter) {
+        log_info("Filtering by library: %s", args->library_filter);
+    }
+    
+    /* Setup libs event callback context */
+    libs_ctx.processor = processor;
+    libs_ctx.formatter = formatter;
+    libs_ctx.events_processed = 0;
+    libs_ctx.events_filtered = 0;
+    
+    /* Record start time */
+    start_time = time(NULL);
+    
+    /* Main event loop */
+    log_debug("Entering main event loop");
+    
+    while (!is_shutdown_requested()) {
+        /* Poll events from ring buffer */
+        ret = ebpf_manager_poll_events(mgr, libs_event_callback, &libs_ctx);
+        if (ret < 0 && ret != -EINTR) {
+            log_error("Error polling events: %d", ret);
+            break;
+        }
+        
+        /* Check duration limit */
+        if (args->duration > 0) {
+            current_time = time(NULL);
+            if (difftime(current_time, start_time) >= args->duration) {
+                log_debug("Duration limit reached (%d seconds)", args->duration);
+                break;
+            }
+        }
+    }
+    
+    /* Process remaining events */
+    if (is_shutdown_requested()) {
+        log_debug("Shutdown requested, processing remaining events...");
+        time_t shutdown_start = time(NULL);
+        while (difftime(time(NULL), shutdown_start) < 1.0) {
+            ret = ebpf_manager_poll_events(mgr, libs_event_callback, &libs_ctx);
+            if (ret < 0 && ret != -EINTR) {
+                break;
+            }
+            if (ret == 0) {
+                break;
+            }
+        }
+    }
+    
+    /* Get final statistics */
+    ebpf_manager_get_stats(mgr, &events_processed_total, &events_dropped_total);
+    
+    /* Log statistics */
+    log_info("Library monitoring complete");
+    log_info("Events processed: %lu", libs_ctx.events_processed);
+    log_info("Events filtered: %lu", libs_ctx.events_filtered);
+    log_info("Events dropped: %lu", events_dropped_total);
+    
+    ret = EXIT_SUCCESS;
+    
+cleanup:
+    log_debug("Cleaning up resources...");
+    
+    /* Cleanup eBPF manager */
+    if (mgr) {
+        ebpf_manager_cleanup(mgr);
+        ebpf_manager_destroy(mgr);
+    }
+    
+    /* Cleanup output formatter */
+    if (formatter) {
+        output_formatter_destroy(formatter);
+    }
+    
+    /* Close output file if we opened it */
+    if (args->output_file && output_file && output_file != stdout) {
+        fclose(output_file);
+    }
+    
+    /* Cleanup event processor */
+    if (processor) {
+        event_processor_destroy(processor);
+    }
+    
+    log_debug("Cleanup complete");
+    
+    return ret;
+}
+
+/**
+ * Files event callback context
+ */
+typedef struct {
+    event_processor_t *processor;
+    output_formatter_t *formatter;
+    uint64_t events_processed;
+    uint64_t events_filtered;
+} files_ctx_t;
+
+/**
+ * Files event callback
+ * Processes only file_open events and outputs them
+ */
+static int files_event_callback(processed_event_t *event, void *ctx) {
+    files_ctx_t *fctx = (files_ctx_t *)ctx;
+    
+    if (!event || !fctx) {
+        return -1;
+    }
+    
+    fctx->events_processed++;
+    
+    /* Requirement 5.1: Only process file_open events */
+    if (!event->event_type || strcmp(event->event_type, "file_open") != 0) {
+        fctx->events_filtered++;
+        return 0;  /* Not a file open event, filter it out */
+    }
+    
+    /* Enrich event with process metadata */
+    enrich_event(event);
+    
+    /* Requirement 5.4: Classify file type */
+    if (event->file) {
+        event->file_type = classify_crypto_file(event->file);
+        
+        /* Filter: Only keep crypto files (filtering moved from eBPF to user-space) */
+        if (event->file_type == FILE_TYPE_UNKNOWN) {
+            fctx->events_filtered++;
+            return 0;  /* Not a crypto file, filter it out */
+        }
+    }
+    
+    /* Apply privacy filtering */
+    apply_privacy_filter(event, fctx->processor->redact_paths);
+    
+    /* Requirement 5.3, 5.5: Apply file path filter with glob pattern support */
+    if (!event_processor_matches_filters(fctx->processor, event)) {
+        fctx->events_filtered++;
+        return 0;  /* Event filtered out */
+    }
+    
+    /* Requirement 5.2: Write event to output as JSON with file path, access mode, and process info */
+    if (output_formatter_write_event(fctx->formatter, event) != 0) {
+        log_warn("Failed to write event to output");
+        return -1;
+    }
+    
+    return 0;
 }
 
 /**
  * Execute files command
  * Requirement: 5.1, 5.2, 5.3, 5.4, 5.5
- * Note: Full implementation will be in Task 18
+ * 
+ * Tracks access to cryptographic files (certificates, keys, keystores).
+ * Similar to monitor command but filtered to file events only.
  */
 static int execute_files_command(cli_args_t *args) {
-    (void)args;
-    log_info("Files command not yet fully implemented (Task 18)");
-    return EXIT_SUCCESS;
+    struct ebpf_manager *mgr = NULL;
+    event_processor_t *processor = NULL;
+    output_formatter_t *formatter = NULL;
+    FILE *output_file = NULL;
+    files_ctx_t files_ctx = {0};
+    time_t start_time, current_time;
+    int ret = EXIT_SUCCESS;
+    uint64_t events_processed_total = 0;
+    uint64_t events_dropped_total = 0;
+    
+    log_info("Starting files command");
+    
+    /* Initialize components */
+    log_debug("Initializing components...");
+    
+    /* Create eBPF manager */
+    mgr = ebpf_manager_create();
+    if (!mgr) {
+        log_error("Failed to create eBPF manager");
+        return EXIT_BPF_ERROR;
+    }
+    log_debug("eBPF manager created");
+    
+    /* Create event processor with file filter */
+    processor = event_processor_create(args);
+    if (!processor) {
+        log_error("Failed to create event processor");
+        ebpf_manager_destroy(mgr);
+        return EXIT_GENERAL_ERROR;
+    }
+    log_debug("Event processor created");
+    
+    /* Open output file if specified */
+    if (args->output_file) {
+        output_file = fopen(args->output_file, "w");
+        if (!output_file) {
+            log_error("Failed to open output file: %s", args->output_file);
+            log_system_error("fopen");
+            event_processor_destroy(processor);
+            ebpf_manager_destroy(mgr);
+            return EXIT_GENERAL_ERROR;
+        }
+        log_debug("Output file opened: %s", args->output_file);
+    } else {
+        output_file = stdout;
+    }
+    
+    /* Create output formatter */
+    formatter = output_formatter_create(args->format, output_file);
+    if (!formatter) {
+        log_error("Failed to create output formatter");
+        if (args->output_file && output_file) {
+            fclose(output_file);
+        }
+        event_processor_destroy(processor);
+        ebpf_manager_destroy(mgr);
+        return EXIT_GENERAL_ERROR;
+    }
+    log_debug("Output formatter created");
+    
+    /* Load eBPF programs */
+    log_debug("Loading eBPF programs...");
+    ret = ebpf_manager_load_programs(mgr);
+    if (ret != 0) {
+        log_error("Failed to load eBPF programs");
+        ret = EXIT_BPF_ERROR;
+        goto cleanup;
+    }
+    log_info("eBPF programs loaded successfully");
+    
+    /* Attach eBPF programs */
+    log_debug("Attaching eBPF programs...");
+    ret = ebpf_manager_attach_programs(mgr);
+    if (ret != 0) {
+        log_error("Failed to attach eBPF programs");
+        ret = EXIT_BPF_ERROR;
+        goto cleanup;
+    }
+    log_info("eBPF programs attached successfully");
+    
+    log_info("File monitoring started");
+    if (args->file_filter) {
+        log_info("Filtering by file pattern: %s", args->file_filter);
+    }
+    
+    /* Setup files event callback context */
+    files_ctx.processor = processor;
+    files_ctx.formatter = formatter;
+    files_ctx.events_processed = 0;
+    files_ctx.events_filtered = 0;
+    
+    /* Record start time */
+    start_time = time(NULL);
+    
+    /* Main event loop */
+    log_debug("Entering main event loop");
+    
+    while (!is_shutdown_requested()) {
+        /* Poll events from ring buffer */
+        ret = ebpf_manager_poll_events(mgr, files_event_callback, &files_ctx);
+        if (ret < 0 && ret != -EINTR) {
+            log_error("Error polling events: %d", ret);
+            break;
+        }
+        
+        /* Check duration limit */
+        if (args->duration > 0) {
+            current_time = time(NULL);
+            if (difftime(current_time, start_time) >= args->duration) {
+                log_debug("Duration limit reached (%d seconds)", args->duration);
+                break;
+            }
+        }
+    }
+    
+    /* Process remaining events */
+    if (is_shutdown_requested()) {
+        log_debug("Shutdown requested, processing remaining events...");
+        time_t shutdown_start = time(NULL);
+        while (difftime(time(NULL), shutdown_start) < 1.0) {
+            ret = ebpf_manager_poll_events(mgr, files_event_callback, &files_ctx);
+            if (ret < 0 && ret != -EINTR) {
+                break;
+            }
+            if (ret == 0) {
+                break;
+            }
+        }
+    }
+    
+    /* Get final statistics */
+    ebpf_manager_get_stats(mgr, &events_processed_total, &events_dropped_total);
+    
+    /* Log statistics */
+    log_info("File monitoring complete");
+    log_info("Events processed: %lu", files_ctx.events_processed);
+    log_info("Events filtered: %lu", files_ctx.events_filtered);
+    log_info("Events dropped: %lu", events_dropped_total);
+    
+    ret = EXIT_SUCCESS;
+    
+cleanup:
+    log_debug("Cleaning up resources...");
+    
+    /* Cleanup eBPF manager */
+    if (mgr) {
+        ebpf_manager_cleanup(mgr);
+        ebpf_manager_destroy(mgr);
+    }
+    
+    /* Cleanup output formatter */
+    if (formatter) {
+        output_formatter_destroy(formatter);
+    }
+    
+    /* Close output file if we opened it */
+    if (args->output_file && output_file && output_file != stdout) {
+        fclose(output_file);
+    }
+    
+    /* Cleanup event processor */
+    if (processor) {
+        event_processor_destroy(processor);
+    }
+    
+    log_debug("Cleanup complete");
+    
+    return ret;
 }
 
 /**
