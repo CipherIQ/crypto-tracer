@@ -1,0 +1,334 @@
+.TH CRYPTO-TRACER 1 "November 2024" "crypto-tracer 1.0" "User Commands"
+.SH NAME
+crypto-tracer \- monitor cryptographic operations on Linux systems using eBPF
+.SH SYNOPSIS
+.B crypto-tracer
+.I COMMAND
+[\fIOPTIONS\fR]
+.SH DESCRIPTION
+.B crypto-tracer
+is a standalone eBPF-based command-line tool for monitoring cryptographic operations on Linux systems. It provides real-time visibility into crypto behavior by observing file access, library loading, and API calls related to cryptographic operations.
+.PP
+The tool uses kernel-level instrumentation (eBPF) to monitor crypto activity with minimal performance impact (<0.5% CPU overhead). It is designed for security auditing, troubleshooting, compliance reporting, and development verification.
+.SH COMMANDS
+.TP
+.B monitor
+Monitor all cryptographic activity system-wide in real-time. Captures file access, library loading, process execution, and API calls. Outputs events as JSON stream.
+.TP
+.B profile
+Generate detailed crypto usage profile for a specific process. Aggregates all crypto activity during monitoring period and outputs complete profile document.
+.TP
+.B snapshot
+Take instant snapshot of all processes using cryptography. Scans /proc filesystem to identify crypto libraries and open files. No eBPF required.
+.TP
+.B files
+Monitor access to cryptographic files (certificates, keys, keystores). Supports glob pattern filtering.
+.TP
+.B libs
+Monitor cryptographic library loading (libssl, libcrypto, etc.). Tracks dlopen() calls.
+.SH OPTIONS
+.SS General Options
+.TP
+.BR \-h ", " \-\-help
+Display help message and exit.
+.TP
+.BR \-v ", " \-\-version
+Display version information and exit.
+.TP
+.BR \-\-verbose
+Enable verbose logging output. Shows debug information about eBPF program loading and event processing.
+.TP
+.BR \-\-quiet
+Suppress non-essential output. Only errors and final results are shown.
+.SS Monitoring Options
+.TP
+.BR \-d ", " \-\-duration " \fISECONDS\fR"
+Monitor for specified duration in seconds. Default is unlimited (monitor until interrupted).
+.TP
+.BR \-o ", " \-\-output " \fIFILE\fR"
+Write output to specified file instead of stdout.
+.TP
+.BR \-f ", " \-\-format " \fIFORMAT\fR"
+Output format. Valid values:
+.RS
+.IP \(bu 2
+.B json-stream
+\- One JSON object per line (default)
+.IP \(bu 2
+.B json-array
+\- Valid JSON array
+.IP \(bu 2
+.B json-pretty
+\- Pretty-printed JSON
+.RE
+.SS Filtering Options
+.TP
+.BR \-p ", " \-\-pid " \fIPID\fR"
+Filter events by process ID. Only events from specified PID are shown.
+.TP
+.BR \-n ", " \-\-name " \fINAME\fR"
+Filter events by process name. Supports substring matching.
+.TP
+.BR \-l ", " \-\-library " \fILIBRARY\fR"
+Filter events by library name. Supports substring matching (e.g., "libssl").
+.TP
+.BR \-\-file " \fIPATTERN\fR"
+Filter events by file path. Supports glob patterns (e.g., "*.pem", "/etc/ssl/*").
+.SS Privacy Options
+.TP
+.BR \-\-no\-redact
+Disable automatic path redaction. By default, user home directories are redacted for privacy.
+.SH EXAMPLES
+.SS Monitor all crypto activity for 60 seconds
+.nf
+.RS
+sudo crypto-tracer monitor --duration 60
+.RE
+.fi
+.SS Profile nginx process
+.nf
+.RS
+sudo crypto-tracer profile --name nginx --duration 30
+.RE
+.fi
+.SS Take system snapshot
+.nf
+.RS
+crypto-tracer snapshot --output inventory.json
+.RE
+.fi
+.SS Monitor certificate access
+.nf
+.RS
+sudo crypto-tracer files --file "*.crt" --duration 300
+.RE
+.fi
+.SS Track library loading with filters
+.nf
+.RS
+sudo crypto-tracer libs --library libssl --duration 60
+.RE
+.fi
+.SS Monitor specific process by PID
+.nf
+.RS
+sudo crypto-tracer monitor --pid 1234 --output events.json
+.RE
+.fi
+.SS Pretty-print output
+.nf
+.RS
+sudo crypto-tracer monitor --duration 10 --format json-pretty
+.RE
+.fi
+.SH OUTPUT FORMAT
+.B crypto-tracer
+outputs structured JSON for easy parsing and integration with other tools.
+.SS Event Types
+.TP
+.B file_open
+Tracks access to cryptographic files (certificates, keys, keystores). Includes file path, type classification, access mode, and result.
+.TP
+.B lib_load
+Tracks loading of cryptographic libraries. Includes library path and extracted library name.
+.TP
+.B process_exec
+Tracks process execution. Includes PID, parent PID, and command line.
+.TP
+.B process_exit
+Tracks process termination. Includes PID and exit code.
+.TP
+.B api_call
+Tracks OpenSSL API calls (optional feature). Includes function name and library.
+.SS Profile Document
+Profile command outputs complete JSON document with:
+.RS
+.IP \(bu 2
+Process metadata (PID, name, command line, user)
+.IP \(bu 2
+All loaded crypto libraries with load times
+.IP \(bu 2
+All accessed crypto files with access counts
+.IP \(bu 2
+API call statistics
+.IP \(bu 2
+Aggregated statistics
+.RE
+.SS Snapshot Document
+Snapshot command outputs JSON document with:
+.RS
+.IP \(bu 2
+System information (hostname, kernel version)
+.IP \(bu 2
+All processes using crypto libraries
+.IP \(bu 2
+Open crypto files per process
+.IP \(bu 2
+Summary statistics
+.RE
+.SH PRIVACY AND SECURITY
+.SS Privacy Features
+.B crypto-tracer
+implements automatic path redaction by default:
+.RS
+.IP \(bu 2
+/home/alice/key.pem → /home/USER/key.pem
+.IP \(bu 2
+/root/cert.pem → /home/ROOT/cert.pem
+.IP \(bu 2
+System paths preserved: /etc/ssl/, /usr/lib/
+.RE
+.PP
+The tool never logs:
+.RS
+.IP \(bu 2
+Private key content
+.IP \(bu 2
+Passwords or plaintext data
+.IP \(bu 2
+Only metadata (filenames, timestamps, PIDs)
+.RE
+.SS Security Considerations
+.B crypto-tracer
+operates in read-only mode:
+.RS
+.IP \(bu 2
+No system modifications
+.IP \(bu 2
+No file creation (except specified output file)
+.IP \(bu 2
+eBPF programs verified by kernel for safety
+.IP \(bu 2
+Won't crash monitored applications
+.IP \(bu 2
+Won't affect system stability
+.RE
+.SH SYSTEM REQUIREMENTS
+.SS Kernel Requirements
+.RS
+.IP \(bu 2
+Linux kernel 4.15 or later
+.IP \(bu 2
+eBPF support enabled (CONFIG_BPF=y, CONFIG_BPF_SYSCALL=y)
+.IP \(bu 2
+BTF support recommended (CONFIG_DEBUG_INFO_BTF=y)
+.RE
+.SS Privileges Required
+.B crypto-tracer
+requires special privileges to load eBPF programs. You have three options:
+.PP
+.B Option 1: Run with sudo (simplest)
+.RS
+.nf
+sudo crypto-tracer monitor
+.fi
+.PP
+Works on all systems but requires password each time.
+.RE
+.PP
+.B Option 2: Grant CAP_BPF capability (recommended for kernel 5.8+)
+.RS
+.nf
+sudo setcap cap_bpf,cap_perfmon+ep /usr/bin/crypto-tracer
+crypto-tracer monitor  # Now works without sudo
+.fi
+.PP
+Most secure option. Grants minimal privileges needed:
+.IP \(bu 2
+.B cap_bpf
+- Allows loading eBPF programs
+.IP \(bu 2
+.B cap_perfmon
+- Allows reading performance events
+.PP
+Note: Must re-grant after rebuilding the binary.
+.RE
+.PP
+.B Option 3: Grant CAP_SYS_ADMIN capability (for older kernels < 5.8)
+.RS
+.nf
+sudo setcap cap_sys_admin+ep /usr/bin/crypto-tracer
+crypto-tracer monitor  # Now works without sudo
+.fi
+.PP
+For kernels that don't support CAP_BPF. Grants more privileges than necessary.
+.RE
+.PP
+.B Check capabilities:
+.RS
+.nf
+getcap /usr/bin/crypto-tracer
+.RE
+.fi
+.SH PERFORMANCE
+Typical overhead:
+.RS
+.IP \(bu 2
+CPU: <0.5% average, <2% peak per core
+.IP \(bu 2
+Memory: <50MB RSS
+.IP \(bu 2
+Event processing: Up to 5,000 events/second
+.IP \(bu 2
+Startup time: <2 seconds
+.RE
+.SH EXIT STATUS
+.TP
+.B 0
+Success
+.TP
+.B 1
+General error (runtime error, I/O error)
+.TP
+.B 2
+Invalid arguments or command
+.TP
+.B 3
+Insufficient privileges (need CAP_BPF, CAP_SYS_ADMIN, or root)
+.TP
+.B 4
+Kernel compatibility error (kernel too old or eBPF not enabled)
+.TP
+.B 5
+eBPF program load error (verifier rejection or load failure)
+.SH FILES
+.TP
+.I /sys/kernel/btf/vmlinux
+Kernel BTF information used for CO-RE support
+.TP
+.I /proc/[pid]/maps
+Process memory maps used for library detection
+.TP
+.I /proc/[pid]/fd/
+Process file descriptors used for open file detection
+.TP
+.I /proc/[pid]/comm
+Process name
+.TP
+.I /proc/[pid]/exe
+Process executable path
+.TP
+.I /proc/[pid]/cmdline
+Process command line
+.SH ENVIRONMENT
+.TP
+.B LIBBPF_LOG_LEVEL
+Set libbpf logging level (debug, info, warn, error). Useful for debugging eBPF program loading issues.
+.SH BUGS
+Report bugs to: https://github.com/yourusername/crypto-tracer/issues
+.SH SEE ALSO
+.BR bpftool (8),
+.BR bpftrace (8),
+.BR strace (1),
+.BR lsof (8)
+.PP
+Full documentation: https://github.com/yourusername/crypto-tracer
+.SH AUTHOR
+Written by Graziano Labs Corp.
+.SH COPYRIGHT
+Copyright \(co 2025 Graziano Labs Corp.
+.br
+License GPLv3+: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>.
+.br
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.

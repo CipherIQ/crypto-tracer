@@ -151,12 +151,31 @@ clean:
 # Install target
 .PHONY: install
 install: $(BUILD_DIR)/$(PROJECT_NAME)
+	@echo "Installing crypto-tracer..."
 	install -D -m 755 $(BUILD_DIR)/$(PROJECT_NAME) $(DESTDIR)/usr/bin/$(PROJECT_NAME)
+	@echo "Installing man page..."
+	install -D -m 644 crypto-tracer.1 $(DESTDIR)/usr/share/man/man1/crypto-tracer.1
+	@if command -v mandb >/dev/null 2>&1; then \
+		mandb -q 2>/dev/null || true; \
+	fi
+	@echo "Installation complete!"
+	@echo ""
+	@echo "To run without sudo, grant capabilities:"
+	@echo "  sudo setcap cap_bpf,cap_perfmon+ep /usr/bin/$(PROJECT_NAME)"
+	@echo ""
+	@echo "View man page:"
+	@echo "  man crypto-tracer"
 
 # Uninstall target
 .PHONY: uninstall
 uninstall:
+	@echo "Uninstalling crypto-tracer..."
 	rm -f $(DESTDIR)/usr/bin/$(PROJECT_NAME)
+	rm -f $(DESTDIR)/usr/share/man/man1/crypto-tracer.1
+	@if command -v mandb >/dev/null 2>&1; then \
+		mandb -q 2>/dev/null || true; \
+	fi
+	@echo "Uninstallation complete!"
 
 # Development helpers
 .PHONY: check-deps
@@ -196,6 +215,28 @@ debug: $(BUILD_DIR)/$(PROJECT_NAME)
 static:
 	$(MAKE) STATIC=1
 
+# Package target - create distributable tarball
+.PHONY: package
+package: $(BUILD_DIR)/$(PROJECT_NAME)
+	@echo "Creating distribution package..."
+	@mkdir -p $(BUILD_DIR)/package/$(PROJECT_NAME)-$(VERSION)
+	@cp $(BUILD_DIR)/$(PROJECT_NAME) $(BUILD_DIR)/package/$(PROJECT_NAME)-$(VERSION)/
+	@cp crypto-tracer.1 $(BUILD_DIR)/package/$(PROJECT_NAME)-$(VERSION)/
+	@cp README.md $(BUILD_DIR)/package/$(PROJECT_NAME)-$(VERSION)/
+	@cp DEMO.md $(BUILD_DIR)/package/$(PROJECT_NAME)-$(VERSION)/
+	@cp TROUBLESHOOTING.md $(BUILD_DIR)/package/$(PROJECT_NAME)-$(VERSION)/
+	@cp LICENSE $(BUILD_DIR)/package/$(PROJECT_NAME)-$(VERSION)/
+	@cd $(BUILD_DIR)/package && tar czf $(PROJECT_NAME)-$(VERSION).tar.gz $(PROJECT_NAME)-$(VERSION)
+	@echo "Package created: $(BUILD_DIR)/package/$(PROJECT_NAME)-$(VERSION).tar.gz"
+
+# Package static binary for distribution
+.PHONY: package-static
+package-static: clean
+	@echo "Building static binary for distribution..."
+	@$(MAKE) static
+	@$(MAKE) package
+	@echo "Static package created: $(BUILD_DIR)/package/$(PROJECT_NAME)-$(VERSION).tar.gz"
+
 # Help target
 .PHONY: help
 help:
@@ -207,8 +248,10 @@ help:
 	@echo "  test-unit        Build and run unit tests"
 	@echo "  test-integration Build and run integration tests"
 	@echo "  clean            Remove build artifacts"
-	@echo "  install          Install the program"
-	@echo "  uninstall        Uninstall the program"
+	@echo "  install          Install the program and man page"
+	@echo "  uninstall        Uninstall the program and man page"
+	@echo "  package          Create distribution tarball"
+	@echo "  package-static   Create static binary distribution"
 	@echo "  check-deps       Check build dependencies"
 	@echo "  config           Show build configuration"
 	@echo "  debug            Build with debug symbols"
@@ -219,6 +262,7 @@ help:
 	@echo "  STATIC=1         Enable static linking"
 	@echo "  CC=compiler      Set C compiler (default: gcc)"
 	@echo "  CLANG=compiler   Set Clang compiler (default: clang)"
+	@echo "  DESTDIR=path     Installation prefix (default: /)"
 
 # Ensure eBPF objects depend on common header
 $(EBPF_OBJECTS): $(EBPF_DIR)/common.h
