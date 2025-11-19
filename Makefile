@@ -224,6 +224,8 @@ package: $(BUILD_DIR)/$(PROJECT_NAME)
 package-static: clean
 	@echo "Building static binary for distribution..."
 	@$(MAKE) static
+	@echo "Stripping binary..."
+	@strip $(BUILD_DIR)/$(PROJECT_NAME)
 	@$(MAKE) package
 	@echo "Static package created: $(BUILD_DIR)/package/$(PROJECT_NAME)-$(VERSION).tar.gz"
 
