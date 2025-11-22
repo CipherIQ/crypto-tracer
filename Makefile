@@ -213,7 +213,6 @@ package: $(BUILD_DIR)/$(PROJECT_NAME)
 	@cp $(BUILD_DIR)/$(PROJECT_NAME) $(BUILD_DIR)/package/$(PROJECT_NAME)-$(VERSION)/
 	@cp crypto-tracer.1 $(BUILD_DIR)/package/$(PROJECT_NAME)-$(VERSION)/
 	@cp README.md $(BUILD_DIR)/package/$(PROJECT_NAME)-$(VERSION)/
-	@cp DEMO.md $(BUILD_DIR)/package/$(PROJECT_NAME)-$(VERSION)/
 	@cp TROUBLESHOOTING.md $(BUILD_DIR)/package/$(PROJECT_NAME)-$(VERSION)/
 	@cp LICENSE $(BUILD_DIR)/package/$(PROJECT_NAME)-$(VERSION)/
 	@cd $(BUILD_DIR)/package && tar czf $(PROJECT_NAME)-$(VERSION).tar.gz $(PROJECT_NAME)-$(VERSION)
