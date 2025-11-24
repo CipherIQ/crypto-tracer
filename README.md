@@ -7,13 +7,13 @@ A standalone eBPF-based command-line tool for monitoring cryptographic operation
 crypto-tracer provides real-time visibility into cryptographic behavior by observing file access, library loading, and API calls related to cryptographic operations. It uses kernel-level instrumentation (eBPF) to monitor crypto activity with minimal performance impact (<0.5% CPU overhead).
 
 **Key Features:**
-- 🔍 **Real-time monitoring** of crypto file access and library loading
-- 📊 **Process profiling** with detailed crypto usage statistics
-- 📸 **System snapshots** for crypto inventory and compliance
-- 🔒 **Privacy-first** with automatic path redaction
-- ⚡ **Lightweight** with <50MB memory footprint
-- 🛡️ **Safe** read-only operation, no system modifications
-- 🌐 **Cross-kernel** compatible (Linux 4.15+)
+- **Real-time monitoring** of crypto file access and library loading
+- **Process profiling** with detailed crypto usage statistics
+- **System snapshots** for crypto inventory and compliance
+- **Privacy-first** with automatic path redaction
+- **Lightweight** with <50MB memory footprint
+- **Safe** read-only operation, no system modifications
+- **Cross-kernel** compatible (Linux 4.15+)
 
 **Use Cases:**
 - Security auditing and threat detection
@@ -159,10 +159,6 @@ crypto-tracer/
 │   ├── *.bpf.o                   # Compiled eBPF programs
 │   ├── *.skel.h                  # Generated skeletons
 │   └── crypto-tracer             # Final binary
-├── .kiro/                        # Kiro IDE configuration
-│   ├── docs/                     # Task verification documents
-│   ├── specs/                    # Project specifications
-│   └── steering/                 # AI assistant guidance
 └── Makefile                      # Build system
 ```
 
@@ -521,8 +517,6 @@ crypto-tracer outputs structured JSON for easy parsing and integration.
   "library_name": "libssl"
 }
 ```
-
-See [.kiro/docs/JSON_OUTPUT_EXAMPLES.md](.kiro/docs/JSON_OUTPUT_EXAMPLES.md) for complete format documentation.
 
 ## Privacy and Security
 
