@@ -6,7 +6,37 @@ A standalone eBPF-based command-line tool for monitoring cryptographic operation
 
 crypto-tracer provides real-time visibility into cryptographic behavior by observing file access, library loading, and API calls related to cryptographic operations. It uses kernel-level instrumentation (eBPF) to monitor crypto activity with minimal performance impact (<0.5% CPU overhead).
 
-**Key Features:**
+
+
+### Full CipherIQ Documentation
+#### Read the full CipherIQ **[documentation](https://www.cipheriq.io)** website.
+
+## License
+
+This project is dual-licensed:
+
+### Open Source License (GPL-3.0-or-later)
+
+cbom-generator is free software: you can redistribute it and/or modify it under 
+the terms of the GNU General Public License as published by the Free Software 
+Foundation, either version 3 of the License, or (at your option) any later version.
+
+See [LICENSE](LICENSE) for the full license text.
+
+### Commercial License
+
+For organizations that cannot comply with the GPL-3.0 license terms (for example, 
+if you want to integrate cbom-generator into proprietary software without releasing 
+your source code), we offer commercial licenses.
+
+**Commercial licenses include:**
+- Freedom from GPL copyleft requirements
+- Priority support
+- Custom feature development (optional)
+
+For pricing and terms, contact: **sales@cipheriq.io**
+
+## Features
 - **Real-time monitoring** of crypto file access and library loading
 - **Process profiling** with detailed crypto usage statistics
 - **System snapshots** for crypto inventory and compliance
@@ -15,7 +45,7 @@ crypto-tracer provides real-time visibility into cryptographic behavior by obser
 - **Safe** read-only operation, no system modifications
 - **Cross-kernel** compatible (Linux 4.15+)
 
-**Use Cases:**
+## Use Cases:
 - Security auditing and threat detection
 - Troubleshooting certificate and key loading issues
 - Compliance reporting and crypto inventory
@@ -638,18 +668,12 @@ make test-integration
 make memcheck
 ```
 
-## License
-
-GPL-3.0-or-later
-
-Copyright (c) 2025 Graziano Labs Corp.
-
-This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
-
-See [LICENSE](LICENSE) file for details.
-
 ## Acknowledgments
 
 - Built with [libbpf](https://github.com/libbpf/libbpf)
 - Uses BPF CO-RE (Compile Once - Run Everywhere) technology
 - Inspired by the eBPF community and tools like bpftrace
+
+---
+
+Copyright © 2025 Graziano Labs Corp. All rights reserved.
