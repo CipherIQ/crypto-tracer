@@ -653,7 +653,7 @@ static int setup_ring_buffer(struct ebpf_manager *mgr, event_callback_t callback
     mgr->batch_ctx->callback = callback;
     mgr->batch_ctx->user_ctx = ctx;
     mgr->batch_ctx->events_in_batch = 0;
-    mgr->batch_ctx->max_batch_size = 100; /* Process up to 100 events per poll */
+    mgr->batch_ctx->max_batch_size = 500; /* Process up to 500 events per poll */
     
     /* Create ring buffer manager */
     mgr->rb = ring_buffer__new(ring_buffer_fd, handle_event, mgr->batch_ctx, NULL);
