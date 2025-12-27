@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <signal.h>
+#include <limits.h>
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 
@@ -39,22 +40,99 @@ struct ebpf_manager {
     struct process_exec_trace_bpf *process_exec_skel;
     struct process_exit_trace_bpf *process_exit_skel;
     struct openssl_api_trace_bpf *openssl_api_skel;
-    
+
+    /* Manual uprobe links (auto-attach doesn't work for uprobes) */
+    struct bpf_link *lib_load_link;           /* dlopen() in libc */
+    struct bpf_link *ssl_ctx_new_link;        /* SSL_CTX_new() in libssl */
+    struct bpf_link *ssl_connect_link;        /* SSL_connect() in libssl */
+    struct bpf_link *ssl_accept_link;         /* SSL_accept() in libssl */
+
     /* Ring buffer */
     struct ring_buffer *rb;
     struct event_batch_ctx *batch_ctx;
-    
+
     /* Statistics */
     uint64_t events_processed;
     uint64_t events_dropped;
-    
+
     /* Event buffer pool */
     event_buffer_pool_t *event_pool;
-    
+
     /* Flags */
     bool programs_loaded;
     bool programs_attached;
 };
+
+/**
+ * Find the full path to a shared library.
+ * Searches /proc/self/maps first, then falls back to well-known paths.
+ * Returns 0 on success, -1 on failure.
+ */
+static int find_library_path(const char *lib_name, char *path_out, size_t path_size)
+{
+    FILE *fp;
+    char line[512];
+
+    /* Method 1: Check /proc/self/maps (works if library is loaded in current process) */
+    fp = fopen("/proc/self/maps", "r");
+    if (fp) {
+        while (fgets(line, sizeof(line), fp)) {
+            if (strstr(line, lib_name)) {
+                /* Extract path from line (format: "addr-addr perms offset dev inode path") */
+                char *path = strrchr(line, ' ');
+                if (path && path[1] != '[') {
+                    path++;  /* Skip space */
+                    size_t len = strlen(path);
+                    if (len > 0 && path[len - 1] == '\n') {
+                        path[len - 1] = '\0';
+                    }
+                    strncpy(path_out, path, path_size - 1);
+                    path_out[path_size - 1] = '\0';
+                    fclose(fp);
+                    return 0;
+                }
+            }
+        }
+        fclose(fp);
+    }
+
+    /* Method 2: Check well-known paths for common libraries */
+    if (strstr(lib_name, "libc")) {
+        const char *libc_paths[] = {
+            "/lib/x86_64-linux-gnu/libc.so.6",
+            "/lib64/libc.so.6",
+            "/usr/lib/libc.so.6",
+            "/lib/libc.so.6",
+            NULL
+        };
+        for (int i = 0; libc_paths[i]; i++) {
+            if (access(libc_paths[i], F_OK) == 0) {
+                strncpy(path_out, libc_paths[i], path_size - 1);
+                path_out[path_size - 1] = '\0';
+                return 0;
+            }
+        }
+    } else if (strstr(lib_name, "libssl")) {
+        const char *ssl_paths[] = {
+            "/lib/x86_64-linux-gnu/libssl.so.3",
+            "/lib/x86_64-linux-gnu/libssl.so.1.1",
+            "/lib64/libssl.so.3",
+            "/lib64/libssl.so.1.1",
+            "/usr/lib/libssl.so.3",
+            "/usr/lib/libssl.so.1.1",
+            NULL
+        };
+        for (int i = 0; ssl_paths[i]; i++) {
+            if (access(ssl_paths[i], F_OK) == 0) {
+                strncpy(path_out, ssl_paths[i], path_size - 1);
+                path_out[path_size - 1] = '\0';
+                return 0;
+            }
+        }
+    }
+
+    return -1;
+}
 
 /* Libbpf logging callback - integrate with our logger */
 static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
@@ -264,15 +342,33 @@ int ebpf_manager_attach_programs(struct ebpf_manager *mgr)
         }
     }
     
-    /* Attach lib_load_trace program */
+    /* Attach lib_load_trace program - manual uprobe attachment to dlopen() */
     if (mgr->lib_load_skel) {
-        log_debug("Attaching lib_load_trace...");
-        err = lib_load_trace_bpf__attach(mgr->lib_load_skel);
-        if (err) {
-            log_warn("Failed to attach lib_load_trace: %d", err);
+        char libc_path[PATH_MAX];
+        if (find_library_path("libc", libc_path, sizeof(libc_path)) == 0) {
+            log_debug("Attaching lib_load_trace to %s:dlopen...", libc_path);
+            LIBBPF_OPTS(bpf_uprobe_opts, uprobe_opts);
+            uprobe_opts.func_name = "dlopen";
+            uprobe_opts.retprobe = false;
+
+            mgr->lib_load_link = bpf_program__attach_uprobe_opts(
+                mgr->lib_load_skel->progs.trace_dlopen,
+                -1,         /* Attach to all processes */
+                libc_path,
+                0,          /* Offset resolved from func_name */
+                &uprobe_opts
+            );
+
+            if (!mgr->lib_load_link || libbpf_get_error(mgr->lib_load_link)) {
+                log_warn("Failed to attach lib_load_trace: %s",
+                         strerror(errno));
+                mgr->lib_load_link = NULL;
+            } else {
+                attached_count++;
+                log_info("lib_load_trace attached to %s:dlopen", libc_path);
+            }
         } else {
-            attached_count++;
-            log_debug("lib_load_trace attached successfully");
+            log_warn("Could not find libc.so path for lib_load_trace");
         }
     }
     
@@ -300,15 +396,66 @@ int ebpf_manager_attach_programs(struct ebpf_manager *mgr)
         }
     }
     
-    /* Attach openssl_api_trace program (optional) */
+    /* Attach openssl_api_trace program (optional) - manual uprobe attachment */
     if (mgr->openssl_api_skel) {
-        log_debug("Attaching openssl_api_trace (optional)...");
-        err = openssl_api_trace_bpf__attach(mgr->openssl_api_skel);
-        if (err) {
-            log_info("OpenSSL API tracing not attached (optional): %d", err);
+        char libssl_path[PATH_MAX];
+        if (find_library_path("libssl", libssl_path, sizeof(libssl_path)) == 0) {
+            log_debug("Attaching openssl_api_trace to %s...", libssl_path);
+            int ssl_attached = 0;
+
+            /* Attach SSL_CTX_new uprobe */
+            {
+                LIBBPF_OPTS(bpf_uprobe_opts, opts);
+                opts.func_name = "SSL_CTX_new";
+                opts.retprobe = false;
+                mgr->ssl_ctx_new_link = bpf_program__attach_uprobe_opts(
+                    mgr->openssl_api_skel->progs.trace_ssl_ctx_new,
+                    -1, libssl_path, 0, &opts);
+                if (mgr->ssl_ctx_new_link && !libbpf_get_error(mgr->ssl_ctx_new_link)) {
+                    ssl_attached++;
+                } else {
+                    mgr->ssl_ctx_new_link = NULL;
+                }
+            }
+
+            /* Attach SSL_connect uprobe */
+            {
+                LIBBPF_OPTS(bpf_uprobe_opts, opts);
+                opts.func_name = "SSL_connect";
+                opts.retprobe = false;
+                mgr->ssl_connect_link = bpf_program__attach_uprobe_opts(
+                    mgr->openssl_api_skel->progs.trace_ssl_connect,
+                    -1, libssl_path, 0, &opts);
+                if (mgr->ssl_connect_link && !libbpf_get_error(mgr->ssl_connect_link)) {
+                    ssl_attached++;
+                } else {
+                    mgr->ssl_connect_link = NULL;
+                }
+            }
+
+            /* Attach SSL_accept uprobe */
+            {
+                LIBBPF_OPTS(bpf_uprobe_opts, opts);
+                opts.func_name = "SSL_accept";
+                opts.retprobe = false;
+                mgr->ssl_accept_link = bpf_program__attach_uprobe_opts(
+                    mgr->openssl_api_skel->progs.trace_ssl_accept,
+                    -1, libssl_path, 0, &opts);
+                if (mgr->ssl_accept_link && !libbpf_get_error(mgr->ssl_accept_link)) {
+                    ssl_attached++;
+                } else {
+                    mgr->ssl_accept_link = NULL;
+                }
+            }
+
+            if (ssl_attached > 0) {
+                attached_count++;
+                log_info("openssl_api_trace attached to %s (%d functions)", libssl_path, ssl_attached);
+            } else {
+                log_info("OpenSSL API tracing not attached (optional)");
+            }
         } else {
-            attached_count++;
-            log_debug("openssl_api_trace attached successfully");
+            log_info("Could not find libssl.so path (OpenSSL tracing disabled)");
         }
     }
     
@@ -612,60 +759,104 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
 
 /**
  * Setup ring buffer for event collection
+ * NOTE: Each BPF program has its own ring buffer map, so we must add all of them
+ * to the ring buffer manager to receive events from all programs.
  */
 static int setup_ring_buffer(struct ebpf_manager *mgr, event_callback_t callback, void *ctx)
 {
     int ring_buffer_fd = -1;
-    
+    int added_count = 0;
+
     if (!mgr) {
         return -EINVAL;
     }
-    
-    /* Get ring buffer FD from one of the loaded programs
-     * All programs share the same ring buffer map */
-    if (mgr->file_open_skel) {
-        ring_buffer_fd = bpf_map__fd(mgr->file_open_skel->maps.events);
-    } else if (mgr->lib_load_skel) {
-        ring_buffer_fd = bpf_map__fd(mgr->lib_load_skel->maps.events);
-    } else if (mgr->process_exec_skel) {
-        ring_buffer_fd = bpf_map__fd(mgr->process_exec_skel->maps.events);
-    } else if (mgr->process_exit_skel) {
-        ring_buffer_fd = bpf_map__fd(mgr->process_exit_skel->maps.events);
-    } else if (mgr->openssl_api_skel) {
-        ring_buffer_fd = bpf_map__fd(mgr->openssl_api_skel->maps.events);
-    }
-    
-    if (ring_buffer_fd < 0) {
-        log_error("Failed to get ring buffer FD");
-        return -1;
-    }
-    
-    log_debug("Ring buffer FD: %d", ring_buffer_fd);
-    
-    /* Allocate batch context */
+
+    /* Allocate batch context first */
     mgr->batch_ctx = calloc(1, sizeof(*mgr->batch_ctx));
     if (!mgr->batch_ctx) {
         log_error("Failed to allocate batch context");
         return -1;
     }
-    
+
     mgr->batch_ctx->mgr = mgr;
     mgr->batch_ctx->callback = callback;
     mgr->batch_ctx->user_ctx = ctx;
     mgr->batch_ctx->events_in_batch = 0;
     mgr->batch_ctx->max_batch_size = 500; /* Process up to 500 events per poll */
-    
-    /* Create ring buffer manager */
-    mgr->rb = ring_buffer__new(ring_buffer_fd, handle_event, mgr->batch_ctx, NULL);
+
+    /* Create ring buffer manager with the first available ring buffer */
+    if (mgr->file_open_skel) {
+        ring_buffer_fd = bpf_map__fd(mgr->file_open_skel->maps.events);
+        mgr->rb = ring_buffer__new(ring_buffer_fd, handle_event, mgr->batch_ctx, NULL);
+        if (mgr->rb) {
+            added_count++;
+            log_debug("Added file_open_trace ring buffer (fd=%d)", ring_buffer_fd);
+        }
+    }
+
+    if (!mgr->rb) {
+        /* Try other programs if file_open_skel wasn't available */
+        if (mgr->lib_load_skel) {
+            ring_buffer_fd = bpf_map__fd(mgr->lib_load_skel->maps.events);
+            mgr->rb = ring_buffer__new(ring_buffer_fd, handle_event, mgr->batch_ctx, NULL);
+            if (mgr->rb) {
+                added_count++;
+                log_debug("Added lib_load_trace ring buffer (fd=%d)", ring_buffer_fd);
+            }
+        }
+    }
+
     if (!mgr->rb) {
         log_system_error("Failed to create ring buffer");
         free(mgr->batch_ctx);
         mgr->batch_ctx = NULL;
         return -1;
     }
-    
-    log_debug("Ring buffer created successfully");
-    
+
+    /* Add remaining ring buffers from other programs */
+    if (mgr->lib_load_skel && added_count == 1 && mgr->file_open_skel) {
+        /* lib_load wasn't the first one, add it now */
+        ring_buffer_fd = bpf_map__fd(mgr->lib_load_skel->maps.events);
+        if (ring_buffer__add(mgr->rb, ring_buffer_fd, handle_event, mgr->batch_ctx) == 0) {
+            added_count++;
+            log_debug("Added lib_load_trace ring buffer (fd=%d)", ring_buffer_fd);
+        } else {
+            log_warn("Failed to add lib_load_trace ring buffer");
+        }
+    }
+
+    if (mgr->process_exec_skel) {
+        ring_buffer_fd = bpf_map__fd(mgr->process_exec_skel->maps.events);
+        if (ring_buffer__add(mgr->rb, ring_buffer_fd, handle_event, mgr->batch_ctx) == 0) {
+            added_count++;
+            log_debug("Added process_exec_trace ring buffer (fd=%d)", ring_buffer_fd);
+        } else {
+            log_warn("Failed to add process_exec_trace ring buffer");
+        }
+    }
+
+    if (mgr->process_exit_skel) {
+        ring_buffer_fd = bpf_map__fd(mgr->process_exit_skel->maps.events);
+        if (ring_buffer__add(mgr->rb, ring_buffer_fd, handle_event, mgr->batch_ctx) == 0) {
+            added_count++;
+            log_debug("Added process_exit_trace ring buffer (fd=%d)", ring_buffer_fd);
+        } else {
+            log_warn("Failed to add process_exit_trace ring buffer");
+        }
+    }
+
+    if (mgr->openssl_api_skel) {
+        ring_buffer_fd = bpf_map__fd(mgr->openssl_api_skel->maps.events);
+        if (ring_buffer__add(mgr->rb, ring_buffer_fd, handle_event, mgr->batch_ctx) == 0) {
+            added_count++;
+            log_debug("Added openssl_api_trace ring buffer (fd=%d)", ring_buffer_fd);
+        } else {
+            log_warn("Failed to add openssl_api_trace ring buffer");
+        }
+    }
+
+    log_info("Ring buffer manager created with %d ring buffer(s)", added_count);
+
     return 0;
 }
 
@@ -750,13 +941,31 @@ void ebpf_manager_cleanup(struct ebpf_manager *mgr)
     }
     
     /* Detach and destroy programs in reverse order (uprobes first, then tracepoints) */
-    
+
+    /* Step 0: Destroy manual uprobe links first (before skeleton destruction) */
+    if (mgr->ssl_accept_link && !cleanup_timeout) {
+        bpf_link__destroy(mgr->ssl_accept_link);
+        mgr->ssl_accept_link = NULL;
+    }
+    if (mgr->ssl_connect_link && !cleanup_timeout) {
+        bpf_link__destroy(mgr->ssl_connect_link);
+        mgr->ssl_connect_link = NULL;
+    }
+    if (mgr->ssl_ctx_new_link && !cleanup_timeout) {
+        bpf_link__destroy(mgr->ssl_ctx_new_link);
+        mgr->ssl_ctx_new_link = NULL;
+    }
+    if (mgr->lib_load_link && !cleanup_timeout) {
+        bpf_link__destroy(mgr->lib_load_link);
+        mgr->lib_load_link = NULL;
+    }
+
     /* Step 1: Detach uprobes first */
     if (mgr->openssl_api_skel && !cleanup_timeout) {
         openssl_api_trace_bpf__destroy(mgr->openssl_api_skel);
         mgr->openssl_api_skel = NULL;
     }
-    
+
     if (mgr->lib_load_skel && !cleanup_timeout) {
         lib_load_trace_bpf__destroy(mgr->lib_load_skel);
         mgr->lib_load_skel = NULL;
