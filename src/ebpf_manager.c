@@ -44,8 +44,27 @@ struct ebpf_manager {
     /* Manual uprobe links (auto-attach doesn't work for uprobes) */
     struct bpf_link *lib_load_link;           /* dlopen() in libc */
     struct bpf_link *ssl_ctx_new_link;        /* SSL_CTX_new() in libssl */
-    struct bpf_link *ssl_connect_link;        /* SSL_connect() in libssl */
-    struct bpf_link *ssl_accept_link;         /* SSL_accept() in libssl */
+    struct bpf_link *ssl_new_entry_link;      /* SSL_new() entry */
+    struct bpf_link *ssl_new_return_link;     /* SSL_new() return */
+    struct bpf_link *ssl_connect_entry_link;  /* SSL_connect() entry */
+    struct bpf_link *ssl_connect_return_link; /* SSL_connect() return */
+    struct bpf_link *ssl_accept_entry_link;   /* SSL_accept() entry */
+    struct bpf_link *ssl_accept_return_link;  /* SSL_accept() return */
+
+    /* State accumulation uprobe links (update BPF map, no events emitted) */
+    struct bpf_link *ssl_use_cert_file_link;      /* SSL_use_certificate_file() */
+    struct bpf_link *ssl_ctx_use_cert_file_link;  /* SSL_CTX_use_certificate_file() */
+    struct bpf_link *ssl_use_cert_chain_file_link;     /* SSL_use_certificate_chain_file() */
+    struct bpf_link *ssl_ctx_use_cert_chain_file_link; /* SSL_CTX_use_certificate_chain_file() */
+    struct bpf_link *ssl_set_fd_link;             /* SSL_set_fd() */
+    struct bpf_link *ssl_set_cipher_list_link;    /* SSL_set_cipher_list() */
+    struct bpf_link *ssl_ctx_set_cipher_list_link; /* SSL_CTX_set_cipher_list() */
+
+    /* SSL_do_handshake probes for Python ssl module and other high-level libs */
+    struct bpf_link *ssl_set_connect_state_link;  /* SSL_set_connect_state() - client mode */
+    struct bpf_link *ssl_set_accept_state_link;   /* SSL_set_accept_state() - server mode */
+    struct bpf_link *ssl_do_handshake_entry_link; /* SSL_do_handshake() entry */
+    struct bpf_link *ssl_do_handshake_return_link;/* SSL_do_handshake() return */
 
     /* Ring buffer */
     struct ring_buffer *rb;
@@ -418,33 +437,306 @@ int ebpf_manager_attach_programs(struct ebpf_manager *mgr)
                 }
             }
 
-            /* Attach SSL_connect uprobe */
+            /* Attach SSL_new entry uprobe (for SSL_CTX→SSL state propagation) */
+            {
+                LIBBPF_OPTS(bpf_uprobe_opts, opts);
+                opts.func_name = "SSL_new";
+                opts.retprobe = false;
+                mgr->ssl_new_entry_link = bpf_program__attach_uprobe_opts(
+                    mgr->openssl_api_skel->progs.trace_ssl_new_entry,
+                    -1, libssl_path, 0, &opts);
+                if (mgr->ssl_new_entry_link && !libbpf_get_error(mgr->ssl_new_entry_link)) {
+                    ssl_attached++;
+                    log_debug("Attached SSL_new entry uprobe");
+                } else {
+                    mgr->ssl_new_entry_link = NULL;
+                }
+            }
+
+            /* Attach SSL_new return uretprobe (propagates state from SSL_CTX to SSL) */
+            {
+                LIBBPF_OPTS(bpf_uprobe_opts, opts);
+                opts.func_name = "SSL_new";
+                opts.retprobe = true;
+                mgr->ssl_new_return_link = bpf_program__attach_uprobe_opts(
+                    mgr->openssl_api_skel->progs.trace_ssl_new_return,
+                    -1, libssl_path, 0, &opts);
+                if (mgr->ssl_new_return_link && !libbpf_get_error(mgr->ssl_new_return_link)) {
+                    ssl_attached++;
+                    log_debug("Attached SSL_new return uretprobe");
+                } else {
+                    mgr->ssl_new_return_link = NULL;
+                }
+            }
+
+            /* Attach SSL_connect entry uprobe */
             {
                 LIBBPF_OPTS(bpf_uprobe_opts, opts);
                 opts.func_name = "SSL_connect";
                 opts.retprobe = false;
-                mgr->ssl_connect_link = bpf_program__attach_uprobe_opts(
-                    mgr->openssl_api_skel->progs.trace_ssl_connect,
+                mgr->ssl_connect_entry_link = bpf_program__attach_uprobe_opts(
+                    mgr->openssl_api_skel->progs.trace_ssl_connect_entry,
                     -1, libssl_path, 0, &opts);
-                if (mgr->ssl_connect_link && !libbpf_get_error(mgr->ssl_connect_link)) {
+                if (mgr->ssl_connect_entry_link && !libbpf_get_error(mgr->ssl_connect_entry_link)) {
                     ssl_attached++;
+                    log_debug("Attached SSL_connect entry uprobe");
                 } else {
-                    mgr->ssl_connect_link = NULL;
+                    log_warn("Failed to attach SSL_connect entry uprobe: %ld",
+                             libbpf_get_error(mgr->ssl_connect_entry_link));
+                    mgr->ssl_connect_entry_link = NULL;
                 }
             }
 
-            /* Attach SSL_accept uprobe */
+            /* Attach SSL_connect return uretprobe */
+            {
+                LIBBPF_OPTS(bpf_uprobe_opts, opts);
+                opts.func_name = "SSL_connect";
+                opts.retprobe = true;
+                mgr->ssl_connect_return_link = bpf_program__attach_uprobe_opts(
+                    mgr->openssl_api_skel->progs.trace_ssl_connect_return,
+                    -1, libssl_path, 0, &opts);
+                if (mgr->ssl_connect_return_link && !libbpf_get_error(mgr->ssl_connect_return_link)) {
+                    ssl_attached++;
+                    log_debug("Attached SSL_connect return uretprobe");
+                } else {
+                    log_warn("Failed to attach SSL_connect return uretprobe: %ld",
+                             libbpf_get_error(mgr->ssl_connect_return_link));
+                    mgr->ssl_connect_return_link = NULL;
+                }
+            }
+
+            /* Attach SSL_accept entry uprobe */
             {
                 LIBBPF_OPTS(bpf_uprobe_opts, opts);
                 opts.func_name = "SSL_accept";
                 opts.retprobe = false;
-                mgr->ssl_accept_link = bpf_program__attach_uprobe_opts(
-                    mgr->openssl_api_skel->progs.trace_ssl_accept,
+                mgr->ssl_accept_entry_link = bpf_program__attach_uprobe_opts(
+                    mgr->openssl_api_skel->progs.trace_ssl_accept_entry,
                     -1, libssl_path, 0, &opts);
-                if (mgr->ssl_accept_link && !libbpf_get_error(mgr->ssl_accept_link)) {
+                if (mgr->ssl_accept_entry_link && !libbpf_get_error(mgr->ssl_accept_entry_link)) {
                     ssl_attached++;
+                    log_debug("Attached SSL_accept entry uprobe");
                 } else {
-                    mgr->ssl_accept_link = NULL;
+                    log_warn("Failed to attach SSL_accept entry uprobe: %ld",
+                             libbpf_get_error(mgr->ssl_accept_entry_link));
+                    mgr->ssl_accept_entry_link = NULL;
+                }
+            }
+
+            /* Attach SSL_accept return uretprobe */
+            {
+                LIBBPF_OPTS(bpf_uprobe_opts, opts);
+                opts.func_name = "SSL_accept";
+                opts.retprobe = true;
+                mgr->ssl_accept_return_link = bpf_program__attach_uprobe_opts(
+                    mgr->openssl_api_skel->progs.trace_ssl_accept_return,
+                    -1, libssl_path, 0, &opts);
+                if (mgr->ssl_accept_return_link && !libbpf_get_error(mgr->ssl_accept_return_link)) {
+                    ssl_attached++;
+                    log_debug("Attached SSL_accept return uretprobe");
+                } else {
+                    log_warn("Failed to attach SSL_accept return uretprobe: %ld",
+                             libbpf_get_error(mgr->ssl_accept_return_link));
+                    mgr->ssl_accept_return_link = NULL;
+                }
+            }
+
+            /* ============================================================
+             * Phase 1-3 Enhancement Uprobes
+             * ============================================================ */
+
+            /* Phase 1: Attach SSL_use_certificate_file uprobe */
+            {
+                LIBBPF_OPTS(bpf_uprobe_opts, opts);
+                opts.func_name = "SSL_use_certificate_file";
+                opts.retprobe = false;
+                mgr->ssl_use_cert_file_link = bpf_program__attach_uprobe_opts(
+                    mgr->openssl_api_skel->progs.trace_ssl_use_cert_file,
+                    -1, libssl_path, 0, &opts);
+                if (mgr->ssl_use_cert_file_link &&
+                    !libbpf_get_error(mgr->ssl_use_cert_file_link)) {
+                    ssl_attached++;
+                    log_debug("Attached SSL_use_certificate_file uprobe");
+                } else {
+                    mgr->ssl_use_cert_file_link = NULL;
+                }
+            }
+
+            /* Phase 1: Attach SSL_CTX_use_certificate_file uprobe */
+            {
+                LIBBPF_OPTS(bpf_uprobe_opts, opts);
+                opts.func_name = "SSL_CTX_use_certificate_file";
+                opts.retprobe = false;
+                mgr->ssl_ctx_use_cert_file_link = bpf_program__attach_uprobe_opts(
+                    mgr->openssl_api_skel->progs.trace_ssl_ctx_use_cert_file,
+                    -1, libssl_path, 0, &opts);
+                if (mgr->ssl_ctx_use_cert_file_link &&
+                    !libbpf_get_error(mgr->ssl_ctx_use_cert_file_link)) {
+                    ssl_attached++;
+                    log_debug("Attached SSL_CTX_use_certificate_file uprobe");
+                } else {
+                    mgr->ssl_ctx_use_cert_file_link = NULL;
+                }
+            }
+
+            /* Attach SSL_use_certificate_chain_file uprobe (used by openssl s_server) */
+            {
+                LIBBPF_OPTS(bpf_uprobe_opts, opts);
+                opts.func_name = "SSL_use_certificate_chain_file";
+                opts.retprobe = false;
+                mgr->ssl_use_cert_chain_file_link = bpf_program__attach_uprobe_opts(
+                    mgr->openssl_api_skel->progs.trace_ssl_use_cert_chain_file,
+                    -1, libssl_path, 0, &opts);
+                if (mgr->ssl_use_cert_chain_file_link &&
+                    !libbpf_get_error(mgr->ssl_use_cert_chain_file_link)) {
+                    ssl_attached++;
+                    log_debug("Attached SSL_use_certificate_chain_file uprobe");
+                } else {
+                    mgr->ssl_use_cert_chain_file_link = NULL;
+                }
+            }
+
+            /* Attach SSL_CTX_use_certificate_chain_file uprobe (used by openssl s_server) */
+            {
+                LIBBPF_OPTS(bpf_uprobe_opts, opts);
+                opts.func_name = "SSL_CTX_use_certificate_chain_file";
+                opts.retprobe = false;
+                mgr->ssl_ctx_use_cert_chain_file_link = bpf_program__attach_uprobe_opts(
+                    mgr->openssl_api_skel->progs.trace_ssl_ctx_use_cert_chain_file,
+                    -1, libssl_path, 0, &opts);
+                if (mgr->ssl_ctx_use_cert_chain_file_link &&
+                    !libbpf_get_error(mgr->ssl_ctx_use_cert_chain_file_link)) {
+                    ssl_attached++;
+                    log_debug("Attached SSL_CTX_use_certificate_chain_file uprobe");
+                } else {
+                    mgr->ssl_ctx_use_cert_chain_file_link = NULL;
+                }
+            }
+
+            /* Phase 2: Attach SSL_set_fd uprobe */
+            {
+                LIBBPF_OPTS(bpf_uprobe_opts, opts);
+                opts.func_name = "SSL_set_fd";
+                opts.retprobe = false;
+                mgr->ssl_set_fd_link = bpf_program__attach_uprobe_opts(
+                    mgr->openssl_api_skel->progs.trace_ssl_set_fd,
+                    -1, libssl_path, 0, &opts);
+                if (mgr->ssl_set_fd_link &&
+                    !libbpf_get_error(mgr->ssl_set_fd_link)) {
+                    ssl_attached++;
+                    log_debug("Attached SSL_set_fd uprobe");
+                } else {
+                    mgr->ssl_set_fd_link = NULL;
+                }
+            }
+
+            /* Phase 3: Attach SSL_set_cipher_list uprobe */
+            {
+                LIBBPF_OPTS(bpf_uprobe_opts, opts);
+                opts.func_name = "SSL_set_cipher_list";
+                opts.retprobe = false;
+                mgr->ssl_set_cipher_list_link = bpf_program__attach_uprobe_opts(
+                    mgr->openssl_api_skel->progs.trace_ssl_set_cipher_list,
+                    -1, libssl_path, 0, &opts);
+                if (mgr->ssl_set_cipher_list_link &&
+                    !libbpf_get_error(mgr->ssl_set_cipher_list_link)) {
+                    ssl_attached++;
+                    log_debug("Attached SSL_set_cipher_list uprobe");
+                } else {
+                    mgr->ssl_set_cipher_list_link = NULL;
+                }
+            }
+
+            /* Phase 3: Attach SSL_CTX_set_cipher_list uprobe */
+            {
+                LIBBPF_OPTS(bpf_uprobe_opts, opts);
+                opts.func_name = "SSL_CTX_set_cipher_list";
+                opts.retprobe = false;
+                mgr->ssl_ctx_set_cipher_list_link = bpf_program__attach_uprobe_opts(
+                    mgr->openssl_api_skel->progs.trace_ssl_ctx_set_cipher_list,
+                    -1, libssl_path, 0, &opts);
+                if (mgr->ssl_ctx_set_cipher_list_link &&
+                    !libbpf_get_error(mgr->ssl_ctx_set_cipher_list_link)) {
+                    ssl_attached++;
+                    log_debug("Attached SSL_CTX_set_cipher_list uprobe");
+                } else {
+                    mgr->ssl_ctx_set_cipher_list_link = NULL;
+                }
+            }
+
+            /* ============================================================
+             * SSL_do_handshake Probes (for Python ssl, nginx, etc.)
+             *
+             * Python's ssl module uses SSL_do_handshake() instead of
+             * SSL_connect/SSL_accept. We track client/server mode via
+             * SSL_set_connect_state/SSL_set_accept_state.
+             * ============================================================ */
+
+            /* Attach SSL_set_connect_state uprobe (client mode marker) */
+            {
+                LIBBPF_OPTS(bpf_uprobe_opts, opts);
+                opts.func_name = "SSL_set_connect_state";
+                opts.retprobe = false;
+                mgr->ssl_set_connect_state_link = bpf_program__attach_uprobe_opts(
+                    mgr->openssl_api_skel->progs.trace_ssl_set_connect_state,
+                    -1, libssl_path, 0, &opts);
+                if (mgr->ssl_set_connect_state_link &&
+                    !libbpf_get_error(mgr->ssl_set_connect_state_link)) {
+                    ssl_attached++;
+                    log_debug("Attached SSL_set_connect_state uprobe");
+                } else {
+                    mgr->ssl_set_connect_state_link = NULL;
+                }
+            }
+
+            /* Attach SSL_set_accept_state uprobe (server mode marker) */
+            {
+                LIBBPF_OPTS(bpf_uprobe_opts, opts);
+                opts.func_name = "SSL_set_accept_state";
+                opts.retprobe = false;
+                mgr->ssl_set_accept_state_link = bpf_program__attach_uprobe_opts(
+                    mgr->openssl_api_skel->progs.trace_ssl_set_accept_state,
+                    -1, libssl_path, 0, &opts);
+                if (mgr->ssl_set_accept_state_link &&
+                    !libbpf_get_error(mgr->ssl_set_accept_state_link)) {
+                    ssl_attached++;
+                    log_debug("Attached SSL_set_accept_state uprobe");
+                } else {
+                    mgr->ssl_set_accept_state_link = NULL;
+                }
+            }
+
+            /* Attach SSL_do_handshake entry uprobe */
+            {
+                LIBBPF_OPTS(bpf_uprobe_opts, opts);
+                opts.func_name = "SSL_do_handshake";
+                opts.retprobe = false;
+                mgr->ssl_do_handshake_entry_link = bpf_program__attach_uprobe_opts(
+                    mgr->openssl_api_skel->progs.trace_ssl_do_handshake_entry,
+                    -1, libssl_path, 0, &opts);
+                if (mgr->ssl_do_handshake_entry_link &&
+                    !libbpf_get_error(mgr->ssl_do_handshake_entry_link)) {
+                    ssl_attached++;
+                    log_debug("Attached SSL_do_handshake entry uprobe");
+                } else {
+                    mgr->ssl_do_handshake_entry_link = NULL;
+                }
+            }
+
+            /* Attach SSL_do_handshake return uretprobe */
+            {
+                LIBBPF_OPTS(bpf_uprobe_opts, opts);
+                opts.func_name = "SSL_do_handshake";
+                opts.retprobe = true;
+                mgr->ssl_do_handshake_return_link = bpf_program__attach_uprobe_opts(
+                    mgr->openssl_api_skel->progs.trace_ssl_do_handshake_return,
+                    -1, libssl_path, 0, &opts);
+                if (mgr->ssl_do_handshake_return_link &&
+                    !libbpf_get_error(mgr->ssl_do_handshake_return_link)) {
+                    ssl_attached++;
+                    log_debug("Attached SSL_do_handshake return uretprobe");
+                } else {
+                    mgr->ssl_do_handshake_return_link = NULL;
                 }
             }
 
@@ -675,10 +967,82 @@ static int process_api_call_event(struct ebpf_manager *mgr, struct ct_api_call_e
     
     /* Call user callback */
     ret = callback ? callback(proc_event, ctx) : 0;
-    
+
     /* Release event back to pool */
     event_buffer_pool_release(mgr->event_pool, proc_event);
-    
+
+    return ret;
+}
+
+/* ============================================================
+ * Enriched TLS Handshake Event Processor
+ * Aggregates cert, socket FD, and cipher list from BPF map state
+ * ============================================================ */
+
+/**
+ * Parse and process enriched TLS handshake event
+ * Emitted on SSL_connect/SSL_accept completion with all accumulated context.
+ * Enables single-observation correlation without user-space stitching.
+ */
+static int process_tls_handshake_event(struct ebpf_manager *mgr,
+                                       struct ct_tls_handshake_event *event,
+                                       event_callback_t callback, void *ctx)
+{
+    processed_event_t *proc_event;
+    char timestamp[64];
+    char ssl_ctx_str[20];
+    char fd_str[16];
+    int ret;
+
+    proc_event = event_buffer_pool_acquire(mgr->event_pool);
+    if (!proc_event) {
+        mgr->events_dropped++;
+        return -1;
+    }
+
+    format_timestamp(event->header.timestamp_ns, timestamp, sizeof(timestamp));
+
+    /* Fill processed event - use "tls_handshake" as the unified event type */
+    proc_event->event_type = strdup("tls_handshake");
+    proc_event->timestamp = strdup(timestamp);
+    proc_event->pid = event->header.pid;
+    proc_event->uid = event->header.uid;
+    proc_event->process = strndup(event->header.comm, MAX_COMM_LEN);
+
+    /* Store SSL context pointer as hex string for correlation */
+    snprintf(ssl_ctx_str, sizeof(ssl_ctx_str), "0x%llx",
+             (unsigned long long)event->ssl_ctx);
+    proc_event->library = strdup(ssl_ctx_str);
+
+    /* Store handshake result */
+    proc_event->result = event->result;
+
+    /* Store cert path if available */
+    if (event->has_cert && event->cert_path[0]) {
+        proc_event->file = strndup(event->cert_path, MAX_FILENAME_LEN);
+    }
+
+    /* Store socket FD if available - in cmdline field for now */
+    if (event->has_fd && event->socket_fd >= 0) {
+        snprintf(fd_str, sizeof(fd_str), "fd:%d", event->socket_fd);
+        proc_event->cmdline = strdup(fd_str);
+    }
+
+    /* Store cipher list if available - in function_name field for now */
+    if (event->has_ciphers && event->cipher_list[0]) {
+        proc_event->function_name = strndup(event->cipher_list, MAX_CIPHER_LIST_LEN);
+    }
+
+    /* Store is_client flag in flags field (reusing available field) */
+    if (event->is_client) {
+        proc_event->flags = strdup("client");
+    } else {
+        proc_event->flags = strdup("server");
+    }
+
+    ret = callback ? callback(proc_event, ctx) : 0;
+    event_buffer_pool_release(mgr->event_pool, proc_event);
+
     return ret;
 }
 
@@ -748,7 +1112,16 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
                                             batch_ctx->callback, batch_ctx->user_ctx);
             }
             break;
-            
+
+        /* Enriched TLS handshake event (aggregated from BPF map state) */
+        case CT_EVENT_TLS_HANDSHAKE:
+            if (data_sz >= sizeof(struct ct_tls_handshake_event)) {
+                ret = process_tls_handshake_event(mgr,
+                    (struct ct_tls_handshake_event *)data,
+                    batch_ctx->callback, batch_ctx->user_ctx);
+            }
+            break;
+
         default:
             log_warn("Unknown event type: %u", header->event_type);
             break;
@@ -943,18 +1316,83 @@ void ebpf_manager_cleanup(struct ebpf_manager *mgr)
     /* Detach and destroy programs in reverse order (uprobes first, then tracepoints) */
 
     /* Step 0: Destroy manual uprobe links first (before skeleton destruction) */
-    if (mgr->ssl_accept_link && !cleanup_timeout) {
-        bpf_link__destroy(mgr->ssl_accept_link);
-        mgr->ssl_accept_link = NULL;
+    if (mgr->ssl_accept_return_link && !cleanup_timeout) {
+        bpf_link__destroy(mgr->ssl_accept_return_link);
+        mgr->ssl_accept_return_link = NULL;
     }
-    if (mgr->ssl_connect_link && !cleanup_timeout) {
-        bpf_link__destroy(mgr->ssl_connect_link);
-        mgr->ssl_connect_link = NULL;
+    if (mgr->ssl_accept_entry_link && !cleanup_timeout) {
+        bpf_link__destroy(mgr->ssl_accept_entry_link);
+        mgr->ssl_accept_entry_link = NULL;
+    }
+    if (mgr->ssl_connect_return_link && !cleanup_timeout) {
+        bpf_link__destroy(mgr->ssl_connect_return_link);
+        mgr->ssl_connect_return_link = NULL;
+    }
+    if (mgr->ssl_connect_entry_link && !cleanup_timeout) {
+        bpf_link__destroy(mgr->ssl_connect_entry_link);
+        mgr->ssl_connect_entry_link = NULL;
     }
     if (mgr->ssl_ctx_new_link && !cleanup_timeout) {
         bpf_link__destroy(mgr->ssl_ctx_new_link);
         mgr->ssl_ctx_new_link = NULL;
     }
+    if (mgr->ssl_new_return_link && !cleanup_timeout) {
+        bpf_link__destroy(mgr->ssl_new_return_link);
+        mgr->ssl_new_return_link = NULL;
+    }
+    if (mgr->ssl_new_entry_link && !cleanup_timeout) {
+        bpf_link__destroy(mgr->ssl_new_entry_link);
+        mgr->ssl_new_entry_link = NULL;
+    }
+
+    /* State accumulation uprobe links cleanup */
+    if (mgr->ssl_use_cert_file_link && !cleanup_timeout) {
+        bpf_link__destroy(mgr->ssl_use_cert_file_link);
+        mgr->ssl_use_cert_file_link = NULL;
+    }
+    if (mgr->ssl_ctx_use_cert_file_link && !cleanup_timeout) {
+        bpf_link__destroy(mgr->ssl_ctx_use_cert_file_link);
+        mgr->ssl_ctx_use_cert_file_link = NULL;
+    }
+    if (mgr->ssl_use_cert_chain_file_link && !cleanup_timeout) {
+        bpf_link__destroy(mgr->ssl_use_cert_chain_file_link);
+        mgr->ssl_use_cert_chain_file_link = NULL;
+    }
+    if (mgr->ssl_ctx_use_cert_chain_file_link && !cleanup_timeout) {
+        bpf_link__destroy(mgr->ssl_ctx_use_cert_chain_file_link);
+        mgr->ssl_ctx_use_cert_chain_file_link = NULL;
+    }
+    if (mgr->ssl_set_fd_link && !cleanup_timeout) {
+        bpf_link__destroy(mgr->ssl_set_fd_link);
+        mgr->ssl_set_fd_link = NULL;
+    }
+    if (mgr->ssl_set_cipher_list_link && !cleanup_timeout) {
+        bpf_link__destroy(mgr->ssl_set_cipher_list_link);
+        mgr->ssl_set_cipher_list_link = NULL;
+    }
+    if (mgr->ssl_ctx_set_cipher_list_link && !cleanup_timeout) {
+        bpf_link__destroy(mgr->ssl_ctx_set_cipher_list_link);
+        mgr->ssl_ctx_set_cipher_list_link = NULL;
+    }
+
+    /* SSL_do_handshake probes cleanup */
+    if (mgr->ssl_set_connect_state_link && !cleanup_timeout) {
+        bpf_link__destroy(mgr->ssl_set_connect_state_link);
+        mgr->ssl_set_connect_state_link = NULL;
+    }
+    if (mgr->ssl_set_accept_state_link && !cleanup_timeout) {
+        bpf_link__destroy(mgr->ssl_set_accept_state_link);
+        mgr->ssl_set_accept_state_link = NULL;
+    }
+    if (mgr->ssl_do_handshake_entry_link && !cleanup_timeout) {
+        bpf_link__destroy(mgr->ssl_do_handshake_entry_link);
+        mgr->ssl_do_handshake_entry_link = NULL;
+    }
+    if (mgr->ssl_do_handshake_return_link && !cleanup_timeout) {
+        bpf_link__destroy(mgr->ssl_do_handshake_return_link);
+        mgr->ssl_do_handshake_return_link = NULL;
+    }
+
     if (mgr->lib_load_link && !cleanup_timeout) {
         bpf_link__destroy(mgr->lib_load_link);
         mgr->lib_load_link = NULL;
