@@ -1258,9 +1258,9 @@ int ebpf_manager_poll_events(struct ebpf_manager *mgr, event_callback_t callback
         mgr->batch_ctx->events_in_batch = 0;
     }
     
-    /* Poll ring buffer with 10ms timeout
+    /* Poll ring buffer with 100ms timeout
      * This will process up to max_batch_size events per call */
-    err = ring_buffer__poll(mgr->rb, 10);
+    err = ring_buffer__poll(mgr->rb, 100);
     if (err < 0 && err != -EINTR) {
         log_error("Error polling ring buffer: %d", err);
         return err;
@@ -1276,7 +1276,7 @@ int ebpf_manager_poll_events(struct ebpf_manager *mgr, event_callback_t callback
         }
     }
     
-    return 0;
+    return mgr->batch_ctx ? mgr->batch_ctx->events_in_batch : 0;
 }
 
 /**
