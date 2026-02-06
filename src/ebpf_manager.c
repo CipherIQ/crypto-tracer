@@ -1066,12 +1066,12 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
     
     /* Check batch size limit for backpressure */
     if (batch_ctx->events_in_batch >= batch_ctx->max_batch_size) {
-        /* Log warning about backpressure */
+        /* Log at debug level - events are still processed, this is informational */
         static uint64_t last_warning = 0;
         uint64_t now = header->timestamp_ns;
         if (now - last_warning > 1000000000ULL) { /* 1 second */
-            log_warn("Event processing backpressure detected (batch size: %d)",
-                     batch_ctx->events_in_batch);
+            log_debug("Event batch size high (%d events in poll cycle)",
+                      batch_ctx->events_in_batch);
             last_warning = now;
         }
     }
@@ -1155,7 +1155,7 @@ static int setup_ring_buffer(struct ebpf_manager *mgr, event_callback_t callback
     mgr->batch_ctx->callback = callback;
     mgr->batch_ctx->user_ctx = ctx;
     mgr->batch_ctx->events_in_batch = 0;
-    mgr->batch_ctx->max_batch_size = 500; /* Process up to 500 events per poll */
+    mgr->batch_ctx->max_batch_size = 5000; /* Warn threshold for events per poll */
 
     /* Create ring buffer manager with the first available ring buffer */
     if (mgr->file_open_skel) {
