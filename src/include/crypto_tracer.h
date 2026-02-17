@@ -92,6 +92,12 @@ typedef struct processed_event {
     file_type_t file_type;     /* Classified file type */
     char *flags;               /* Human-readable flags (for file_open) */
     int32_t result;            /* System call result */
+
+    /* Remote address resolved from kernel sock (TLS handshake events) */
+    uint32_t remote_addr;      /* IPv4 address in network byte order */
+    uint16_t remote_port;      /* Remote port in host byte order */
+    uint16_t local_port;       /* Local port in host byte order */
+    uint8_t has_remote;        /* 1 if remote_addr/port are set */
     
     /* Internal management */
     bool in_use;               /* Buffer pool management flag */

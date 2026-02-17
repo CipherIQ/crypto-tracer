@@ -104,6 +104,11 @@ struct ct_tls_handshake_event {
     char cert_path[MAX_FILENAME_LEN];       /* From SSL_use_certificate_file */
     __s32 socket_fd;                        /* From SSL_set_fd */
     char cipher_list[MAX_CIPHER_LIST_LEN];  /* From SSL_set_cipher_list */
+    __u32 remote_addr;                      /* Remote IPv4 addr (network order), resolved from kernel sock */
+    __u16 remote_port;                      /* Remote port (host order), resolved from kernel sock */
+    __u16 local_port;                       /* Local port (host order), resolved from kernel sock */
+    __u8 has_remote;                        /* 1 if remote_addr/remote_port are set */
+    __u8 _pad2[3];
 };
 
 /**

@@ -66,6 +66,10 @@ struct ebpf_manager {
     struct bpf_link *ssl_do_handshake_entry_link; /* SSL_do_handshake() entry */
     struct bpf_link *ssl_do_handshake_return_link;/* SSL_do_handshake() return */
 
+    /* SSL object cleanup probes - prevent BPF map exhaustion */
+    struct bpf_link *ssl_free_link;              /* SSL_free() - map cleanup */
+    struct bpf_link *ssl_ctx_free_link;          /* SSL_CTX_free() - map cleanup */
+
     /* Ring buffer */
     struct ring_buffer *rb;
     struct event_batch_ctx *batch_ctx;
@@ -740,6 +744,46 @@ int ebpf_manager_attach_programs(struct ebpf_manager *mgr)
                 }
             }
 
+            /* ============================================================
+             * SSL Object Cleanup Probes
+             * Prevent BPF map exhaustion by cleaning entries on SSL_free
+             * and SSL_CTX_free.
+             * ============================================================ */
+
+            /* Attach SSL_free uprobe (cleanup ssl_ctx_map + ssl_mode_map) */
+            {
+                LIBBPF_OPTS(bpf_uprobe_opts, opts);
+                opts.func_name = "SSL_free";
+                opts.retprobe = false;
+                mgr->ssl_free_link = bpf_program__attach_uprobe_opts(
+                    mgr->openssl_api_skel->progs.trace_ssl_free,
+                    -1, libssl_path, 0, &opts);
+                if (mgr->ssl_free_link &&
+                    !libbpf_get_error(mgr->ssl_free_link)) {
+                    ssl_attached++;
+                    log_debug("Attached SSL_free uprobe");
+                } else {
+                    mgr->ssl_free_link = NULL;
+                }
+            }
+
+            /* Attach SSL_CTX_free uprobe (cleanup ssl_ctx_map) */
+            {
+                LIBBPF_OPTS(bpf_uprobe_opts, opts);
+                opts.func_name = "SSL_CTX_free";
+                opts.retprobe = false;
+                mgr->ssl_ctx_free_link = bpf_program__attach_uprobe_opts(
+                    mgr->openssl_api_skel->progs.trace_ssl_ctx_free,
+                    -1, libssl_path, 0, &opts);
+                if (mgr->ssl_ctx_free_link &&
+                    !libbpf_get_error(mgr->ssl_ctx_free_link)) {
+                    ssl_attached++;
+                    log_debug("Attached SSL_CTX_free uprobe");
+                } else {
+                    mgr->ssl_ctx_free_link = NULL;
+                }
+            }
+
             if (ssl_attached > 0) {
                 attached_count++;
                 log_info("openssl_api_trace attached to %s (%d functions)", libssl_path, ssl_attached);
@@ -1040,6 +1084,14 @@ static int process_tls_handshake_event(struct ebpf_manager *mgr,
         proc_event->flags = strdup("server");
     }
 
+    /* Pass through BPF-resolved remote address (from kernel sock) */
+    if (event->has_remote) {
+        proc_event->remote_addr = event->remote_addr;
+        proc_event->remote_port = event->remote_port;
+        proc_event->local_port = event->local_port;
+        proc_event->has_remote = 1;
+    }
+
     ret = callback ? callback(proc_event, ctx) : 0;
     event_buffer_pool_release(mgr->event_pool, proc_event);
 
@@ -1258,9 +1310,13 @@ int ebpf_manager_poll_events(struct ebpf_manager *mgr, event_callback_t callback
         mgr->batch_ctx->events_in_batch = 0;
     }
     
-    /* Poll ring buffer with 100ms timeout
-     * This will process up to max_batch_size events per call */
-    err = ring_buffer__poll(mgr->rb, 100);
+    /* Poll ring buffer with 10ms timeout.
+     * Short timeout reduces max batch size (~400 events vs ~4000 at 100ms
+     * with 40K/sec file_open rate), ensuring TLS_HANDSHAKE events on the
+     * openssl_api ring buffer are processed within a few ms of arrival.
+     * Critical for resolve_socket_fd() which needs /proc/PID/fd/FD to
+     * still exist (process must not have exited yet). */
+    err = ring_buffer__poll(mgr->rb, 10);
     if (err < 0 && err != -EINTR) {
         log_error("Error polling ring buffer: %d", err);
         return err;
@@ -1391,6 +1447,16 @@ void ebpf_manager_cleanup(struct ebpf_manager *mgr)
     if (mgr->ssl_do_handshake_return_link && !cleanup_timeout) {
         bpf_link__destroy(mgr->ssl_do_handshake_return_link);
         mgr->ssl_do_handshake_return_link = NULL;
+    }
+
+    /* SSL object cleanup probes */
+    if (mgr->ssl_free_link && !cleanup_timeout) {
+        bpf_link__destroy(mgr->ssl_free_link);
+        mgr->ssl_free_link = NULL;
+    }
+    if (mgr->ssl_ctx_free_link && !cleanup_timeout) {
+        bpf_link__destroy(mgr->ssl_ctx_free_link);
+        mgr->ssl_ctx_free_link = NULL;
     }
 
     if (mgr->lib_load_link && !cleanup_timeout) {

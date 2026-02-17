@@ -19,6 +19,7 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_tracing.h>
+#include <bpf/bpf_endian.h>
 #include "common.h"
 
 char LICENSE[] SEC("license") = "GPL";
@@ -311,6 +312,76 @@ int trace_ssl_ctx_set_cipher_list(struct pt_regs *ctx) {
 }
 
 /* ============================================================
+ * Socket Address Resolution Helper
+ *
+ * Resolves remote IP:port from a socket FD by traversing kernel
+ * data structures: task->files->fdt->fd[n]->private_data->sk
+ * Must be called in process context (uprobe/uretprobe) while
+ * the socket FD is still open.
+ * ============================================================ */
+
+static __always_inline void resolve_socket_addr(
+    struct ct_tls_handshake_event *event, __s32 socket_fd)
+{
+    struct task_struct *task;
+    struct files_struct *files;
+    struct fdtable *fdt;
+    struct file **fds;
+    struct file *file;
+    struct socket *sock;
+    struct sock *sk;
+
+    if (socket_fd < 0)
+        return;
+
+    task = (struct task_struct *)bpf_get_current_task();
+    if (!task)
+        return;
+
+    files = BPF_CORE_READ(task, files);
+    if (!files)
+        return;
+
+    fdt = BPF_CORE_READ(files, fdt);
+    if (!fdt)
+        return;
+
+    /* Bounds check: make sure fd index is within the table */
+    unsigned int max_fds = BPF_CORE_READ(fdt, max_fds);
+    if ((__u32)socket_fd >= max_fds)
+        return;
+
+    fds = BPF_CORE_READ(fdt, fd);
+    if (!fds)
+        return;
+
+    bpf_probe_read_kernel(&file, sizeof(file), &fds[socket_fd]);
+    if (!file)
+        return;
+
+    /* file->private_data points to struct socket for socket files */
+    sock = BPF_CORE_READ(file, private_data);
+    if (!sock)
+        return;
+
+    sk = BPF_CORE_READ(sock, sk);
+    if (!sk)
+        return;
+
+    /* Read IPv4 remote address and port from sock_common */
+    __u32 daddr = BPF_CORE_READ(sk, __sk_common.skc_daddr);
+    __u16 dport = BPF_CORE_READ(sk, __sk_common.skc_dport);
+    __u16 sport = BPF_CORE_READ(sk, __sk_common.skc_num);
+
+    if (daddr != 0) {
+        event->remote_addr = daddr;
+        event->remote_port = bpf_ntohs(dport);
+        event->local_port = sport;
+        event->has_remote = 1;
+    }
+}
+
+/* ============================================================
  * Handshake Completion Probes (emit enriched event)
  * ============================================================ */
 
@@ -371,6 +442,7 @@ int trace_ssl_connect_return(struct pt_regs *ctx) {
         }
         if (state->has_fd) {
             event->socket_fd = state->socket_fd;
+            resolve_socket_addr(event, state->socket_fd);
         }
         if (state->has_ciphers) {
             __builtin_memcpy(event->cipher_list, state->cipher_list, sizeof(event->cipher_list));
@@ -446,6 +518,7 @@ int trace_ssl_accept_return(struct pt_regs *ctx) {
         }
         if (state->has_fd) {
             event->socket_fd = state->socket_fd;
+            resolve_socket_addr(event, state->socket_fd);
         }
         if (state->has_ciphers) {
             __builtin_memcpy(event->cipher_list, state->cipher_list, sizeof(event->cipher_list));
@@ -573,16 +646,20 @@ int trace_ssl_do_handshake_return(struct pt_regs *ctx) {
         }
         if (state->has_fd) {
             event->socket_fd = state->socket_fd;
+            /* Resolve remote addr from kernel sock while FD is still open.
+             * Must happen here — by the time userspace processes the event,
+             * short-lived processes (openssl s_client) have already closed the FD. */
+            resolve_socket_addr(event, state->socket_fd);
         }
         if (state->has_ciphers) {
             __builtin_memcpy(event->cipher_list, state->cipher_list, sizeof(event->cipher_list));
         }
 
-        /* Clean up state after successful handshake */
-        if (result == 1) {
-            bpf_map_delete_elem(&ssl_ctx_map, &ssl);
-            bpf_map_delete_elem(&ssl_mode_map, &ssl);
-        }
+        /* Clean up state unconditionally to prevent map leak.
+         * Failed handshakes (result != 1) must also release entries,
+         * otherwise the 10k-entry map fills up from ntopng etc. */
+        bpf_map_delete_elem(&ssl_ctx_map, &ssl);
+        bpf_map_delete_elem(&ssl_mode_map, &ssl);
     } else {
         event->has_cert = 0;
         event->has_fd = 0;
@@ -591,5 +668,36 @@ int trace_ssl_do_handshake_return(struct pt_regs *ctx) {
     }
 
     bpf_ringbuf_submit(event, 0);
+    return 0;
+}
+
+/* ============================================================
+ * SSL Object Cleanup Probes
+ *
+ * Ensure BPF map entries are cleaned up when SSL/SSL_CTX objects
+ * are freed, preventing map exhaustion from long-lived contexts.
+ * ============================================================ */
+
+/**
+ * SSL_free(SSL *ssl) - clean up any leftover map entries for this SSL*
+ * Catches cases where SSL objects are freed without a handshake completing.
+ */
+SEC("uprobe/SSL_free")
+int trace_ssl_free(struct pt_regs *ctx) {
+    __u64 ssl = (__u64)PT_REGS_PARM1(ctx);
+    bpf_map_delete_elem(&ssl_ctx_map, &ssl);
+    bpf_map_delete_elem(&ssl_mode_map, &ssl);
+    return 0;
+}
+
+/**
+ * SSL_CTX_free(SSL_CTX *ctx) - clean up SSL_CTX entries from ssl_ctx_map
+ * SSL_CTX entries are created by trace_ssl_ctx_use_cert_file etc. but
+ * never cleaned up otherwise, since only SSL* entries get cleaned on handshake.
+ */
+SEC("uprobe/SSL_CTX_free")
+int trace_ssl_ctx_free(struct pt_regs *ctx) {
+    __u64 ssl_ctx = (__u64)PT_REGS_PARM1(ctx);
+    bpf_map_delete_elem(&ssl_ctx_map, &ssl_ctx);
     return 0;
 }
